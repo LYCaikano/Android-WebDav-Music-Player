@@ -1,0 +1,42 @@
+name: Android CI/CD - Manual Debug Build Artifacts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_and_upload_debug_apk:
+    runs-on: ubuntu-latest
+    
+    env:
+      JAVA_VERSION: '17'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java Environment
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+          
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk-build
+          path: app/build/outputs/apk/debug/app-debug.apk
