@@ -1,10 +1,65 @@
-*.iml
+# Gradle files
 .gradle/
-/local.properties
-/.idea/
-.DS_Store
-/build/
-/app/build/
-/app/release/
-*.apk
+build/
+app/build/
+*/build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log Files
 *.log
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.navigation/
+
+# Android Studio / IntelliJ IDEA (more specific)
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/deploymentTargetDropDown.xml
+
+# Keystore / Binary Outputs
+*.jks
+*.keystore
+*.apk
+*.aar
+*.jar
+*.bin
+
+# Captures and heap dumps
+*.hprof
+*.pyc
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Kotlin / Java
+*.class
+bin/
+
+# Gradle Wrapper
+#!gradle/wrapper/gradle-wrapper.jar
+# Usually we keep the wrapper, so no change there unless asked.
+# But we can ignore wrapper's cache
+.gradle-wrapper/
+
+# Lint and test reports
+lint/
+test-results/
+
+# Crashlytics / Firebase
+google-services.json
+
+# Local properties / secrets
+secrets.properties
+gradle.properties.local

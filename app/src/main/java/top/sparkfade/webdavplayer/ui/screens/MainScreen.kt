@@ -23,7 +23,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -35,10 +34,10 @@ import top.sparkfade.webdavplayer.ui.viewmodel.MainViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    viewModel: MainViewModel,
-    onNavigateToPlayer: () -> Unit,
-    onNavigateToSettings: () -> Unit,
-    onNavigateToDetail: (String, String) -> Unit
+        viewModel: MainViewModel,
+        onNavigateToPlayer: () -> Unit,
+        onNavigateToSettings: () -> Unit,
+        onNavigateToDetail: (String, String) -> Unit
 ) {
     val tabNavController = rememberNavController()
     val navBackStackEntry by tabNavController.currentBackStackEntryAsState()
@@ -47,6 +46,9 @@ fun MainScreen(
     val currentSong by viewModel.currentPlayingSong.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val isBuffering by viewModel.isBuffering.collectAsState()
+    val progress by viewModel.playbackProgress.collectAsState()
+    val duration by viewModel.playbackDuration.collectAsState()
+    val bufferedPosition by viewModel.bufferedPosition.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
 
     val scanningStatus by viewModel.scanningStatus.collectAsState()
@@ -82,113 +84,143 @@ fun MainScreen(
         focusManager.clearFocus()
     }
 
-    BackHandler(enabled = isSearchActive) {
-        closeSearch()
-    }
+    BackHandler(enabled = isSearchActive) { closeSearch() }
 
     Scaffold(
-        topBar = {
-            if (isSearchActive) {
-                TopAppBar(
-                    title = {
-                        TextField(
-                            value = searchQuery,
-                            onValueChange = { viewModel.onSearchQueryChanged(it) },
-                            placeholder = { Text("Search...") },
-                            singleLine = true,
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent
-                            ),
-                            modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = closeSearch) { Icon(Icons.Default.ArrowBack, "Back") }
-                    },
-                    actions = {
-                        if (searchQuery.isNotEmpty()) {
-                            IconButton(onClick = { viewModel.onSearchQueryChanged("") }) {
-                                Icon(Icons.Default.Close, "Clear")
-                            }
-                        }
-                    }
-                )
-            } else {
-                TopAppBar(
-                    title = { Text(
-                        when(currentRoute) {
-                            "tab_albums" -> "Albums"
-                            "tab_artists" -> "Artists"
-                            "tab_playlists" -> "Playlists"
-                            else -> "Songs"
-                        }
-                    ) },
-                    actions = {
-                        IconButton(onClick = { isSearchActive = true }) {
-                            Icon(Icons.Default.Search, "Search")
-                        }
-                        IconButton(onClick = onNavigateToSettings) {
-                            Icon(Icons.Default.Settings, "Settings")
-                        }
-                    }
-                )
-            }
-        },
-        bottomBar = {
-            Column(modifier = Modifier.animateContentSize()) {
-                if (currentSong != null) {
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), thickness = 0.5.dp)
-                    MiniPlayer(
-                        song = currentSong!!,
-                        isPlaying = isPlaying,
-                        isBuffering = isBuffering,
-                        onTogglePlay = { if (isPlaying) viewModel.playerController.value?.pause() else viewModel.playerController.value?.play() },
-                        onClick = onNavigateToPlayer
-                    )
-                }
-
-                NavigationBar(modifier = Modifier.height(80.dp)) {
-                    val items = listOf("Songs", "Albums", "Artists", "Playlists")
-                    val icons = listOf(Icons.Default.MusicNote, Icons.Default.Album, Icons.Default.Person, Icons.Default.QueueMusic)
-
-                    items.forEachIndexed { index, item ->
-                        val route = "tab_${item.lowercase()}"
-                        NavigationBarItem(
-                            icon = { Icon(icons[index], contentDescription = item, modifier = Modifier.size(26.dp)) },
-                            selected = currentRoute == route,
-                            onClick = {
-                                if (currentRoute != route) {
-                                    tabNavController.navigate(route) {
-                                        popUpTo(tabNavController.graph.startDestinationId) { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
+            topBar = {
+                if (isSearchActive) {
+                    TopAppBar(
+                            title = {
+                                TextField(
+                                        value = searchQuery,
+                                        onValueChange = { viewModel.onSearchQueryChanged(it) },
+                                        placeholder = { Text("Search...") },
+                                        singleLine = true,
+                                        colors =
+                                                TextFieldDefaults.colors(
+                                                        focusedContainerColor = Color.Transparent,
+                                                        unfocusedContainerColor = Color.Transparent,
+                                                        focusedIndicatorColor = Color.Transparent,
+                                                        unfocusedIndicatorColor = Color.Transparent
+                                                ),
+                                        modifier =
+                                                Modifier.fillMaxWidth()
+                                                        .focusRequester(focusRequester)
+                                )
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = closeSearch) {
+                                    Icon(Icons.Default.ArrowBack, "Back")
+                                }
+                            },
+                            actions = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { viewModel.onSearchQueryChanged("") }) {
+                                        Icon(Icons.Default.Close, "Clear")
                                     }
                                 }
                             }
+                    )
+                } else {
+                    TopAppBar(
+                            title = {
+                                Text(
+                                        when (currentRoute) {
+                                            "tab_albums" -> "Albums"
+                                            "tab_artists" -> "Artists"
+                                            "tab_playlists" -> "Playlists"
+                                            else -> "Songs"
+                                        }
+                                )
+                            },
+                            actions = {
+                                IconButton(onClick = { isSearchActive = true }) {
+                                    Icon(Icons.Default.Search, "Search")
+                                }
+                                IconButton(onClick = onNavigateToSettings) {
+                                    Icon(Icons.Default.Settings, "Settings")
+                                }
+                            }
+                    )
+                }
+            },
+            bottomBar = {
+                Column(modifier = Modifier.animateContentSize()) {
+                    if (currentSong != null) {
+                        Divider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                thickness = 0.5.dp
                         )
+                        MiniPlayer(
+                                song = currentSong!!,
+                                isPlaying = isPlaying,
+                                isBuffering = isBuffering,
+                                progress = progress,
+                                duration = duration,
+                                bufferedPosition = bufferedPosition,
+                                onTogglePlay = {
+                                    if (isPlaying) viewModel.playerController.value?.pause()
+                                    else viewModel.playerController.value?.play()
+                                },
+                                onClick = onNavigateToPlayer,
+                                onSkipNext = { viewModel.skipToNext() },
+                                onSkipPrevious = { viewModel.skipToPrevious() }
+                        )
+                    }
+
+                    NavigationBar(modifier = Modifier.height(80.dp)) {
+                        val items = listOf("Songs", "Albums", "Artists", "Playlists")
+                        val icons =
+                                listOf(
+                                        Icons.Default.MusicNote,
+                                        Icons.Default.Album,
+                                        Icons.Default.Person,
+                                        Icons.Default.QueueMusic
+                                )
+
+                        items.forEachIndexed { index, item ->
+                            val route = "tab_${item.lowercase()}"
+                            NavigationBarItem(
+                                    icon = {
+                                        Icon(
+                                                icons[index],
+                                                contentDescription = item,
+                                                modifier = Modifier.size(26.dp)
+                                        )
+                                    },
+                                    selected = currentRoute == route,
+                                    onClick = {
+                                        if (currentRoute != route) {
+                                            tabNavController.navigate(route) {
+                                                popUpTo(tabNavController.graph.startDestinationId) {
+                                                    saveState = true
+                                                }
+                                                launchSingleTop = true
+                                                restoreState = true
+                                            }
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                }
+            },
+            floatingActionButton = {
+                if (currentRoute == "tab_playlists") {
+                    FloatingActionButton(onClick = { showCreatePlaylistDialog = true }) {
+                        Icon(Icons.Default.Add, "Create")
                     }
                 }
             }
-        },
-        floatingActionButton = {
-            if (currentRoute == "tab_playlists") {
-                FloatingActionButton(onClick = { showCreatePlaylistDialog = true }) {
-                    Icon(Icons.Default.Add, "Create")
-                }
-            }
-        }
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             NavHost(
-                navController = tabNavController,
-                startDestination = "tab_songs",
-                enterTransition = { fadeIn() },
-                exitTransition = { fadeOut() },
-                popEnterTransition = { fadeIn() },
-                popExitTransition = { fadeOut() }
+                    navController = tabNavController,
+                    startDestination = "tab_songs",
+                    enterTransition = { fadeIn() },
+                    exitTransition = { fadeOut() },
+                    popEnterTransition = { fadeIn() },
+                    popExitTransition = { fadeOut() }
             ) {
                 composable("tab_songs") {
                     BackHandler(enabled = isSearchActive, onBack = closeSearch)
@@ -210,56 +242,62 @@ fun MainScreen(
 
             if (isTabTransitioning) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(99f)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { }
-                        )
+                        modifier =
+                                Modifier.fillMaxSize()
+                                        .zIndex(99f)
+                                        .clickable(
+                                                interactionSource =
+                                                        remember { MutableInteractionSource() },
+                                                indication = null,
+                                                onClick = {}
+                                        )
                 )
             }
 
             // 1.4.3 扫描逻辑更新
             if (scanningStatus != null && allSongs.isEmpty()) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(100f)
-                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.6f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { /* 阻断点击 */ }
-                        ),
-                    contentAlignment = Alignment.Center
+                        modifier =
+                                Modifier.fillMaxSize()
+                                        .zIndex(100f)
+                                        .background(
+                                                MaterialTheme.colorScheme.background.copy(
+                                                        alpha = 0.6f
+                                                )
+                                        )
+                                        .clickable(
+                                                interactionSource =
+                                                        remember { MutableInteractionSource() },
+                                                indication = null,
+                                                onClick = { /* 阻断点击 */}
+                                        ),
+                        contentAlignment = Alignment.Center
                 ) {
                     Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        shadowElevation = 8.dp,
-                        modifier = Modifier.padding(32.dp)
+                            shape = RoundedCornerShape(16.dp),
+                            shadowElevation = 8.dp,
+                            modifier = Modifier.padding(32.dp)
                     ) {
                         Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
                         ) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(48.dp),
-                                strokeWidth = 4.dp
+                                    modifier = Modifier.size(48.dp),
+                                    strokeWidth = 4.dp
                             )
                             Spacer(Modifier.height(16.dp))
                             Text(
-                                text = "Initializing Library",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
+                                    text = "Initializing Library",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                text = scanningStatus ?: "",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = scanningStatus ?: "",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -271,18 +309,28 @@ fun MainScreen(
     if (showCreatePlaylistDialog) {
         var newName by remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { showCreatePlaylistDialog = false },
-            title = { Text("New Playlist") },
-            text = { OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("Name") }) },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (newName.isNotBlank()) {
-                        viewModel.createPlaylist(newName)
-                        showCreatePlaylistDialog = false
-                    }
-                }) { Text("Create") }
-            },
-            dismissButton = { TextButton(onClick = { showCreatePlaylistDialog = false }) { Text("Cancel") } }
+                onDismissRequest = { showCreatePlaylistDialog = false },
+                title = { Text("New Playlist") },
+                text = {
+                    OutlinedTextField(
+                            value = newName,
+                            onValueChange = { newName = it },
+                            label = { Text("Name") }
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                            onClick = {
+                                if (newName.isNotBlank()) {
+                                    viewModel.createPlaylist(newName)
+                                    showCreatePlaylistDialog = false
+                                }
+                            }
+                    ) { Text("Create") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCreatePlaylistDialog = false }) { Text("Cancel") }
+                }
         )
     }
 }
