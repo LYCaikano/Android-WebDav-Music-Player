@@ -194,9 +194,6 @@ fun MiniPlayer(
             Box(modifier = Modifier.fillMaxWidth().height(2.dp)) {
                 val safeProgress =
                         if (duration > 0) (progress.toFloat() / duration).coerceIn(0f, 1f) else 0f
-                val safeBuffered =
-                        if (duration > 0) (bufferedPosition.toFloat() / duration).coerceIn(0f, 1f)
-                        else 0f
 
                 // 底层 - 背景轨道
                 LinearProgressIndicator(
@@ -206,6 +203,12 @@ fun MiniPlayer(
                         trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f),
                 )
                 // 中层 - 缓冲进度 (半透明主题色)
+                // 本地歌曲不显示缓冲条
+                val isLocalSong = song.localPath != null
+                val safeBuffered =
+                        if (!isLocalSong && duration > 0)
+                                (bufferedPosition.toFloat() / duration).coerceIn(0f, 1f)
+                        else 0f
                 if (safeBuffered > 0f) {
                     LinearProgressIndicator(
                             progress = safeBuffered,

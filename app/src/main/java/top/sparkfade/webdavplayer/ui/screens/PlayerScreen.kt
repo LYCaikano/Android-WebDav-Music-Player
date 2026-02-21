@@ -248,8 +248,10 @@ fun PlayerScreen(viewModel: MainViewModel, onBack: () -> Unit) {
                             trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f),
                     )
                     // 中层 - 缓冲进度 (半透明主题色, padding 与 Slider thumb 半径对齐)
+                    // 本地歌曲不显示缓冲条
+                    val isLocalSong = currentSong?.localPath != null
                     val safeBuffered =
-                            if (duration > 0)
+                            if (!isLocalSong && duration > 0)
                                     (bufferedPosition.toFloat() / duration).coerceIn(0f, 1f)
                             else 0f
                     if (safeBuffered > 0f) {

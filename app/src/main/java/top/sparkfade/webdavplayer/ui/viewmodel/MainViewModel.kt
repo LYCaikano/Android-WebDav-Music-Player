@@ -2,6 +2,8 @@ package top.sparkfade.webdavplayer.ui.viewmodel
 
 import android.app.Application
 import android.content.ComponentName
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -39,6 +41,7 @@ import top.sparkfade.webdavplayer.service.PlaybackService
 import top.sparkfade.webdavplayer.utils.CurrentSession
 import top.sparkfade.webdavplayer.utils.dataStore
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class MainViewModel
 @Inject
@@ -162,13 +165,15 @@ constructor(
     val playbackMode = MutableStateFlow(0)
     private var bufferingTimeoutJob: Job? = null
 
+    // 播放错误消息通道
+    private val _playbackError =
+            kotlinx.coroutines.channels.Channel<String>(
+                    kotlinx.coroutines.channels.Channel.CONFLATED
+            )
+    val playbackError = _playbackError.receiveAsFlow()
+
     private val _currentPlaylist = MutableStateFlow<List<Song>>(emptyList())
     val currentPlaylist = _currentPlaylist.asStateFlow()
-    // val renamedAlbumRedirects = androidx.compose.runtime.mutableStateMapOf<String, String>()
-
-    // private val _redirectChannel = kotlinx.coroutines.channels.Channel<Pair<String,
-    // String>>(kotlinx.coroutines.channels.Channel.BUFFERED)
-    // val redirectFlow = _redirectChannel.receiveAsFlow()
 
     val isCurrentSongFavorite: StateFlow<Boolean> =
             _currentPlayingSong
@@ -452,6 +457,52 @@ constructor(
         )
     }
 
+    /**
+     * 在播放列表中查找距离当前位置最近的可离线播放歌曲索引。 优先向后搜索，同时向前搜索，返回距离最近的那一个。 可离线 = localPath != null (已下载) 或
+     * isCached == true (已完整缓冲)
+     * @return 播放列表中的索引，找不到则返回 -1
+     */
+    private fun findNearestOfflineIndex(currentIndex: Int): Int {
+        val playlist = _currentPlaylist.value
+        if (playlist.isEmpty()) return -1
+
+        fun Song.isAvailableOffline(): Boolean = localPath != null || isCached
+
+        // 同时向前和向后搜索，返回距离最近的
+        var forward = currentIndex + 1
+        var backward = currentIndex - 1
+        while (forward < playlist.size || backward >= 0) {
+            if (forward < playlist.size && playlist[forward].isAvailableOffline()) return forward
+            if (backward >= 0 && playlist[backward].isAvailableOffline()) return backward
+            forward++
+            backward--
+        }
+        return -1
+    }
+
+    /**
+     * 无网络时跳转到最近的离线可用歌曲；有网络时按原逻辑跳下一首。
+     * @return true 表示已处理（跳到了离线歌曲或停止播放），false 表示应走常规跳曲逻辑
+     */
+    private fun skipToOfflineOrStop(player: Player): Boolean {
+        if (isNetworkAvailable()) return false // 有网络，走常规逻辑
+
+        val currentIndex = player.currentMediaItemIndex
+        val offlineIdx = findNearestOfflineIndex(currentIndex)
+        if (offlineIdx != -1) {
+            player.seekToDefaultPosition(offlineIdx)
+            player.prepare()
+            player.play()
+            _currentPlayingSong.value = _currentPlaylist.value[offlineIdx]
+        } else {
+            // 没有任何离线歌曲，停止播放
+            player.stop()
+            isBuffering.value = false
+            _playbackError.trySend("无可用离线歌曲")
+        }
+        return true
+    }
+
     private fun setupPlayerListener(player: Player?) {
         player?.addListener(
                 object : Player.Listener {
@@ -531,16 +582,21 @@ constructor(
                             bufferingTimeoutJob =
                                     viewModelScope.launch {
                                         delay(5000)
-                                        // 5秒后仍在缓冲中，自动跳到下一首
+                                        // 5秒后仍在缓冲中，自动跳曲
                                         if (isBuffering.value &&
                                                         player.playbackState ==
                                                                 Player.STATE_BUFFERING
                                         ) {
+                                            val noNetwork = !isNetworkAvailable()
+                                            val errorMsg = if (noNetwork) "无网络连接" else "播放超时"
+                                            _playbackError.trySend(errorMsg)
                                             withContext(Dispatchers.Main) {
-                                                if (player.hasNextMediaItem()) {
+                                                // 无网络时跳到最近的离线歌曲
+                                                if (noNetwork) {
+                                                    skipToOfflineOrStop(player)
+                                                } else if (player.hasNextMediaItem()) {
                                                     player.seekToNext()
                                                 } else {
-                                                    // 没有下一首了，停止播放
                                                     player.stop()
                                                     isBuffering.value = false
                                                 }
@@ -555,11 +611,16 @@ constructor(
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
-                        // 播放出错，自动跳到下一首
+                        val noNetwork = !isNetworkAvailable()
+                        val errorMsg = if (noNetwork) "无网络连接" else "播放错误"
+                        _playbackError.trySend(errorMsg)
                         isBuffering.value = false
                         bufferingTimeoutJob?.cancel()
                         bufferingTimeoutJob = null
-                        if (player.hasNextMediaItem()) {
+                        if (noNetwork) {
+                            // 无网络：跳到最近的离线可用歌曲
+                            skipToOfflineOrStop(player)
+                        } else if (player.hasNextMediaItem()) {
                             player.seekToNext()
                             player.prepare()
                             player.play()
@@ -876,7 +937,8 @@ constructor(
     }
 
     fun seekTo(pos: Long) {
-        _playerController.value?.seekTo(pos)
+        val player = _playerController.value ?: return
+        player.seekTo(pos)
         isBuffering.value = true
         playbackProgress.value = pos
     }
@@ -990,7 +1052,7 @@ constructor(
                 repository.updateQueue(newQueue)
             }
 
-            // 穷举清理应该删除的文件
+            // 清理应该删除的文件
             songsToDelete.forEach { song ->
                 try {
                     // 删除下载的音频文件
@@ -1169,16 +1231,22 @@ constructor(
                             savePlaybackState(currentPos)
                         }
                     }
-                    // 始终更新缓冲进度（无论播放/暂停/缓冲中）
-                    if (player.playbackState == Player.STATE_BUFFERING ||
-                                    player.playbackState == Player.STATE_READY
-                    ) {
-                        bufferedPosition.value = player.bufferedPosition
-                    }
+                    // 始终更新缓冲进度（任何状态下都读取真实值）
+                    bufferedPosition.value = player.bufferedPosition
                 }
                 delay(500)
             }
         }
+    }
+
+    private fun isNetworkAvailable(): Boolean {
+        val cm =
+                getApplication<Application>()
+                        .getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as
+                        ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
     override fun onCleared() {
         playbackProgress.value.let { savePlaybackState(it) }
