@@ -27,8 +27,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import kotlinx.coroutines.delay
 import top.sparkfade.webdavplayer.ui.components.MiniPlayer
+import top.sparkfade.webdavplayer.ui.components.PlaylistBottomSheet
 import top.sparkfade.webdavplayer.ui.viewmodel.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,17 +55,9 @@ fun MainScreen(
     // 监听所有歌曲，用于判断是否是"首次/空库"状态
     val allSongs by viewModel.allSongs.collectAsState()
 
-    var isTabTransitioning by remember { mutableStateOf(false) }
-    LaunchedEffect(currentRoute) {
-        if (currentRoute != null) {
-            isTabTransitioning = true
-            delay(100)
-            isTabTransitioning = false
-        }
-    }
-
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    var showPlaylistSheet by remember { mutableStateOf(false) }
 
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -158,13 +150,11 @@ fun MainScreen(
                                 progress = progress,
                                 duration = duration,
                                 bufferedPosition = bufferedPosition,
-                                onTogglePlay = {
-                                    if (isPlaying) viewModel.playerController.value?.pause()
-                                    else viewModel.playerController.value?.play()
-                                },
+                                onTogglePlay = { viewModel.togglePlayPause() },
                                 onClick = onNavigateToPlayer,
                                 onSkipNext = { viewModel.skipToNext() },
-                                onSkipPrevious = { viewModel.skipToPrevious() }
+                                onSkipPrevious = { viewModel.skipToPrevious() },
+                                onShowPlaylist = { showPlaylistSheet = true }
                         )
                     }
 
@@ -224,7 +214,7 @@ fun MainScreen(
             ) {
                 composable("tab_songs") {
                     BackHandler(enabled = isSearchActive, onBack = closeSearch)
-                    LibraryScreen(viewModel, onNavigateToPlayer, onNavigateToSettings)
+                    LibraryScreen(viewModel, onNavigateToPlayer)
                 }
                 composable("tab_albums") {
                     BackHandler(enabled = isSearchActive, onBack = closeSearch)
@@ -238,20 +228,6 @@ fun MainScreen(
                     BackHandler(enabled = isSearchActive, onBack = closeSearch)
                     PlaylistsPage(viewModel) { onNavigateToDetail("playlist", it) }
                 }
-            }
-
-            if (isTabTransitioning) {
-                Box(
-                        modifier =
-                                Modifier.fillMaxSize()
-                                        .zIndex(99f)
-                                        .clickable(
-                                                interactionSource =
-                                                        remember { MutableInteractionSource() },
-                                                indication = null,
-                                                onClick = {}
-                                        )
-                )
             }
 
             // 1.4.3 扫描逻辑更新
@@ -332,5 +308,10 @@ fun MainScreen(
                     TextButton(onClick = { showCreatePlaylistDialog = false }) { Text("Cancel") }
                 }
         )
+    }
+
+    // 播放列表 Bottom Sheet
+    if (showPlaylistSheet) {
+        PlaylistBottomSheet(viewModel = viewModel, onDismiss = { showPlaylistSheet = false })
     }
 }

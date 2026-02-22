@@ -7,34 +7,27 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.zIndex
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import top.sparkfade.webdavplayer.ui.screens.DetailScreen
 import top.sparkfade.webdavplayer.ui.screens.LoginScreen
@@ -79,24 +72,6 @@ class MainActivity : ComponentActivity() {
 
                     val rootNavController = rememberNavController()
                     val accountToEdit by mainViewModel.accountToEdit.collectAsState()
-
-                    var isRootTransitioning by remember { mutableStateOf(false) }
-
-                    DisposableEffect(rootNavController) {
-                        val listener =
-                                NavController.OnDestinationChangedListener { _, _, _ ->
-                                    isRootTransitioning = true
-                                }
-                        rootNavController.addOnDestinationChangedListener(listener)
-                        onDispose { rootNavController.removeOnDestinationChangedListener(listener) }
-                    }
-
-                    LaunchedEffect(isRootTransitioning) {
-                        if (isRootTransitioning) {
-                            delay(180)
-                            isRootTransitioning = false
-                        }
-                    }
 
                     var lastActionTime by remember { mutableLongStateOf(0L) }
 
@@ -249,22 +224,6 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                             ) { PlayerScreen(viewModel = mainViewModel, onBack = safeBack) }
-                        }
-
-                        if (isRootTransitioning) {
-                            Box(
-                                    modifier =
-                                            Modifier.fillMaxSize()
-                                                    .zIndex(99f)
-                                                    .clickable(
-                                                            interactionSource =
-                                                                    remember {
-                                                                        MutableInteractionSource()
-                                                                    },
-                                                            indication = null,
-                                                            onClick = {}
-                                                    )
-                            )
                         }
                     }
                 }

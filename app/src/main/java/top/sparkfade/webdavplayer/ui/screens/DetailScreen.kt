@@ -25,6 +25,7 @@ import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.ui.components.BatchSongSelectionDialog
 import top.sparkfade.webdavplayer.ui.components.MarqueeText
 import top.sparkfade.webdavplayer.ui.components.MiniPlayer
+import top.sparkfade.webdavplayer.ui.components.PlaylistBottomSheet
 import top.sparkfade.webdavplayer.ui.components.PlaylistSelectionDialog
 import top.sparkfade.webdavplayer.ui.components.SongDetailDialog
 import top.sparkfade.webdavplayer.ui.components.SongListItem
@@ -69,6 +70,7 @@ fun DetailScreen(
     var songForPlaylist by remember { mutableStateOf<Song?>(null) }
     var songForDetails by remember { mutableStateOf<Song?>(null) }
     var showBatchAddDialog by remember { mutableStateOf(false) }
+    var showPlaylistSheet by remember { mutableStateOf(false) }
 
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -191,13 +193,11 @@ fun DetailScreen(
                                 progress = progress,
                                 duration = duration,
                                 bufferedPosition = bufferedPosition,
-                                onTogglePlay = {
-                                    if (isPlaying) viewModel.playerController.value?.pause()
-                                    else viewModel.playerController.value?.play()
-                                },
+                                onTogglePlay = { viewModel.togglePlayPause() },
                                 onClick = onNavigateToPlayer,
                                 onSkipNext = { viewModel.skipToNext() },
-                                onSkipPrevious = { viewModel.skipToPrevious() }
+                                onSkipPrevious = { viewModel.skipToPrevious() },
+                                onShowPlaylist = { showPlaylistSheet = true }
                         )
                     }
                 }
@@ -261,5 +261,10 @@ fun DetailScreen(
                 },
                 onDismiss = { showBatchAddDialog = false }
         )
+    }
+
+    // 播放列表 Bottom Sheet
+    if (showPlaylistSheet) {
+        PlaylistBottomSheet(viewModel = viewModel, onDismiss = { showPlaylistSheet = false })
     }
 }

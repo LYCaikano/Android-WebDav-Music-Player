@@ -6,6 +6,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.sparkfade.webdavplayer.data.model.Song
 
@@ -39,7 +41,8 @@ fun MiniPlayer(
         onTogglePlay: () -> Unit,
         onClick: () -> Unit,
         onSkipNext: () -> Unit,
-        onSkipPrevious: () -> Unit
+        onSkipPrevious: () -> Unit,
+        onShowPlaylist: () -> Unit
 ) {
     val density = LocalDensity.current
     val screenWidthPx = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
@@ -74,7 +77,7 @@ fun MiniPlayer(
             // 主内容区域 (可滑动 - 翻页效果)
             Box(
                     modifier =
-                            Modifier.weight(1f).fillMaxWidth().pointerInput(Unit) {
+                            Modifier.weight(1f).fillMaxWidth().pointerInput(song.id) {
                                 detectHorizontalDragGestures(
                                         onDragEnd = {
                                             scope.launch {
@@ -91,6 +94,17 @@ fun MiniPlayer(
                                                     // 触发切歌
                                                     if (direction > 0) onSkipPrevious()
                                                     else onSkipNext()
+                                                    // 安全回弹: 若歌曲未变 (单曲/边界),
+                                                    // LaunchedEffect(song.id) 不会触发,
+                                                    // entryDirection 仍非 0 → 回弹到原位
+                                                    delay(300)
+                                                    if (entryDirection != 0) {
+                                                        entryDirection = 0
+                                                        offsetX.animateTo(
+                                                                0f,
+                                                                animationSpec = tween(200)
+                                                        )
+                                                    }
                                                 } else {
                                                     // 没超过阈值 → 弹回原位
                                                     offsetX.animateTo(
@@ -185,6 +199,16 @@ fun MiniPlayer(
                                     )
                                 }
                             }
+                        }
+
+                        // 播放列表按钮
+                        IconButton(onClick = onShowPlaylist, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                    Icons.Default.List,
+                                    contentDescription = "播放列表",
+                                    modifier = Modifier.size(22.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }

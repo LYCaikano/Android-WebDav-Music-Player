@@ -164,6 +164,7 @@ constructor(
     val playbackDuration = MutableStateFlow(1L)
     val playbackMode = MutableStateFlow(0)
     private var bufferingTimeoutJob: Job? = null
+    private var consecutiveErrorCount = 0 // 连续错误计数器，防止无限跳曲
 
     // 播放错误消息通道
     private val _playbackError =
@@ -540,8 +541,6 @@ constructor(
                                                 shouldUpdate(newArtist, current.artist) ||
                                                 shouldUpdate(newAlbum, current.album)
                                 ) {
-
-                                    // 调用通用逻辑进行更新当前歌曲
                                     updateMetadataLogic(
                                             targetSong = current,
                                             realTitle = newTitle,
@@ -549,6 +548,13 @@ constructor(
                                             realAlbum = newAlbum,
                                             artworkData = null
                                     )
+                                } else if (!current.isMetadataVerified) {
+                                    // 元数据一致但尚未验证，标记为已验证防止深度扫描覆盖
+                                    val verified = current.copy(isMetadataVerified = true)
+                                    repository.updateSong(verified)
+                                    withContext(Dispatchers.Main) {
+                                        _currentPlayingSong.value = verified
+                                    }
                                 }
                             }
                         }
@@ -558,6 +564,7 @@ constructor(
                         if (playbackState == Player.STATE_READY) {
                             playbackDuration.value = player.duration.coerceAtLeast(1L)
                             isBuffering.value = false
+                            consecutiveErrorCount = 0 // 播放成功，重置连续错误计数
                             // 缓冲完成，取消超时任务
                             bufferingTimeoutJob?.cancel()
                             bufferingTimeoutJob = null
@@ -587,12 +594,21 @@ constructor(
                                                         player.playbackState ==
                                                                 Player.STATE_BUFFERING
                                         ) {
+                                            consecutiveErrorCount++
                                             val noNetwork = !isNetworkAvailable()
-                                            val errorMsg = if (noNetwork) "无网络连接" else "播放超时"
+                                            val errorMsg =
+                                                    if (noNetwork) "No network connection"
+                                                    else "Playback timeout"
                                             _playbackError.trySend(errorMsg)
                                             withContext(Dispatchers.Main) {
-                                                // 无网络时跳到最近的离线歌曲
-                                                if (noNetwork) {
+                                                val maxRetries =
+                                                        _currentPlaylist.value.size.coerceAtMost(3)
+                                                if (consecutiveErrorCount >= maxRetries) {
+                                                    // 连续错误过多，停止播放
+                                                    player.stop()
+                                                    isBuffering.value = false
+                                                    consecutiveErrorCount = 0
+                                                } else if (noNetwork) {
                                                     skipToOfflineOrStop(player)
                                                 } else if (player.hasNextMediaItem()) {
                                                     player.seekToNext()
@@ -611,13 +627,19 @@ constructor(
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
+                        consecutiveErrorCount++
                         val noNetwork = !isNetworkAvailable()
-                        val errorMsg = if (noNetwork) "无网络连接" else "播放错误"
+                        val errorMsg = if (noNetwork) "No network connection" else "Playback error"
                         _playbackError.trySend(errorMsg)
                         isBuffering.value = false
                         bufferingTimeoutJob?.cancel()
                         bufferingTimeoutJob = null
-                        if (noNetwork) {
+                        val maxRetries = _currentPlaylist.value.size.coerceAtMost(3)
+                        if (consecutiveErrorCount >= maxRetries) {
+                            // 连续错误过多，停止播放
+                            player.stop()
+                            consecutiveErrorCount = 0
+                        } else if (noNetwork) {
                             // 无网络：跳到最近的离线可用歌曲
                             skipToOfflineOrStop(player)
                         } else if (player.hasNextMediaItem()) {
@@ -875,6 +897,7 @@ constructor(
 
     fun playSong(song: Song, playlist: List<Song>) {
         val controller = _playerController.value ?: return
+        consecutiveErrorCount = 0
         _currentPlaylist.value = playlist
         viewModelScope.launch { repository.updateQueue(playlist) }
         val index = playlist.indexOfFirst { it.id == song.id }
@@ -889,6 +912,7 @@ constructor(
 
     fun skipToQueueItem(index: Int) {
         val controller = _playerController.value ?: return
+        consecutiveErrorCount = 0
         if (index in 0 until _currentPlaylist.value.size) {
             val song = _currentPlaylist.value[index]
             _currentPlayingSong.value = song
@@ -901,6 +925,7 @@ constructor(
 
     fun skipToNext() {
         val player = _playerController.value ?: return
+        consecutiveErrorCount = 0
         if (player.hasNextMediaItem()) {
             isBuffering.value = true
             player.seekToNext()
@@ -911,8 +936,23 @@ constructor(
 
     fun skipToPrevious() {
         val player = _playerController.value ?: return
+        consecutiveErrorCount = 0
         isBuffering.value = true
         player.seekToPrevious()
+    }
+
+    fun togglePlayPause() {
+        val player = _playerController.value ?: return
+        consecutiveErrorCount = 0
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            // player.stop() 后进入 STATE_IDLE，需要先 prepare() 才能播放
+            if (player.playbackState == Player.STATE_IDLE) {
+                player.prepare()
+            }
+            player.play()
+        }
     }
 
     fun togglePlaybackMode() {
