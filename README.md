@@ -72,7 +72,7 @@ top.sparkfade.webdavplayer
 ```
 
 ## ⚡ 快速开始
-#### 从action下载构建好的apk或自行构建
+#### 从[releases](https://github.com/LYCaikano/Android-WebDav-Music-Player/releases)下载构建好的apk 或 自行构建
 
 ### 环境要求
 
