@@ -183,8 +183,9 @@ constructor(
         return combine(repository.allPlaylists, repository.getPlaylistIdsForSong(songId)) {
                 all,
                 currentIds ->
+            val playlistIdSet = currentIds.toHashSet()
             all.filter { it.id != 2L && it.id != 3L }.map { playlist ->
-                playlist to currentIds.contains(playlist.id)
+                playlist to playlistIdSet.contains(playlist.id)
             }
         }
     }
@@ -193,7 +194,7 @@ constructor(
 
     fun addSongsToPlaylist(playlistId: Long, songIds: List<Long>) {
         viewModelScope.launch {
-            songIds.forEach { songId -> repository.addToPlaylist(playlistId, songId) }
+            repository.addToPlaylist(playlistId, songIds)
         }
     }
 

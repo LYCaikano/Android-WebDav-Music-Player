@@ -22,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -40,6 +41,7 @@ import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
 import top.sparkfade.webdavplayer.data.remote.WebDavXmlParser
 import top.sparkfade.webdavplayer.di.NetworkModule
+import top.sparkfade.webdavplayer.security.CredentialCipher
 import top.sparkfade.webdavplayer.utils.Constants
 import top.sparkfade.webdavplayer.utils.CurrentSession
 
@@ -52,14 +54,17 @@ constructor(
         private val accountDao: WebDavAccountDao,
         private val playlistDao: PlaylistDao,
         @NetworkModule.SafeClient private val safeClient: OkHttpClient,
-        @NetworkModule.UnsafeClient private val unsafeClient: OkHttpClient
+        @NetworkModule.UnsafeClient private val unsafeClient: OkHttpClient,
+        private val credentialCipher: CredentialCipher
 ) {
     private val TAG = "WebDavPlayer"
     private val parser = WebDavXmlParser()
     private val USER_AGENT = "WebDavMusicPlayer/1.0 (Android; ExoPlayer)"
+    private val DELETE_BATCH_SIZE = 400
 
     val allSongs: Flow<List<Song>> = songDao.getAllSongs()
-    val allAccounts: Flow<List<WebDavAccount>> = accountDao.getAllAccounts()
+    val allAccounts: Flow<List<WebDavAccount>> =
+            accountDao.getAllAccounts().map { accounts -> accounts.map(::decryptAccount) }
     val allPlaylists: Flow<List<Playlist>> = playlistDao.getAllPlaylists()
 
     init {
@@ -75,11 +80,13 @@ constructor(
     }
 
     // --- 账号与歌曲管理 ---
-    suspend fun addAccount(account: WebDavAccount): Long = accountDao.insert(account)
-    suspend fun getAllAccountsList(): List<WebDavAccount> = accountDao.getAllAccountsList()
-    suspend fun updateAccount(account: WebDavAccount) = accountDao.update(account)
+    suspend fun addAccount(account: WebDavAccount): Long = accountDao.insert(encryptAccount(account))
+    suspend fun getAllAccountsList(): List<WebDavAccount> =
+            accountDao.getAllAccountsList().map(::decryptAccount)
+    suspend fun updateAccount(account: WebDavAccount) = accountDao.update(encryptAccount(account))
     suspend fun updateSong(song: Song) = songDao.update(song)
-    suspend fun getAccountById(id: Long): WebDavAccount? = accountDao.getAccountById(id)
+    suspend fun getAccountById(id: Long): WebDavAccount? =
+            accountDao.getAccountById(id)?.let(::decryptAccount)
     suspend fun deleteAccount(account: WebDavAccount) {
         accountDao.delete(account)
         songDao.clearByAccountId(account.id)
@@ -89,6 +96,12 @@ constructor(
     suspend fun getSongById(id: Long): Song? = songDao.getSongById(id)
     suspend fun clearLocalPaths() = songDao.clearAllLocalPaths()
     suspend fun clearArtworkPaths() = songDao.clearAllArtworkPaths()
+
+    private fun encryptAccount(account: WebDavAccount): WebDavAccount =
+            account.copy(password = credentialCipher.encrypt(account.password))
+
+    private fun decryptAccount(account: WebDavAccount): WebDavAccount =
+            account.copy(password = credentialCipher.decrypt(account.password))
 
     // --- 歌单管理 ---
     suspend fun initDefaultPlaylists() {
@@ -125,18 +138,33 @@ constructor(
         playlistDao.addSongToPlaylist(PlaylistSongCrossRef(playlistId, songId))
     }
 
+    suspend fun addToPlaylist(playlistId: Long, songIds: List<Long>) {
+        if (songIds.isEmpty()) return
+        val baseAddedAt = System.currentTimeMillis()
+        val refs =
+                songIds.distinct().mapIndexed { index, songId ->
+                    PlaylistSongCrossRef(
+                            playlistId = playlistId,
+                            songId = songId,
+                            addedAt = baseAddedAt + index
+                    )
+                }
+        playlistDao.addSongsToPlaylist(refs)
+    }
+
     suspend fun removeFromPlaylist(playlistId: Long, songId: Long) {
         playlistDao.removeSongFromPlaylist(playlistId, songId)
     }
 
     suspend fun updateQueue(songs: List<Song>) {
         playlistDao.clearPlaylist(3)
+        val baseAddedAt = System.currentTimeMillis()
         val refs =
                 songs.mapIndexed { index, song ->
                     PlaylistSongCrossRef(
                             playlistId = 3,
                             songId = song.id,
-                            addedAt = System.currentTimeMillis() + index
+                            addedAt = baseAddedAt + index
                     )
                 }
         playlistDao.insertPlaylistSongCrossRefs(refs)
@@ -314,7 +342,9 @@ constructor(
                                                                 isMetadataVerified =
                                                                         oldSong.isMetadataVerified // 保持锁定状态
                                                         )
-                                                toUpdate.add(merged)
+                                                if (hasSongContentChanged(oldSong, merged)) {
+                                                    toUpdate.add(merged)
+                                                }
                                             } else {
                                                 toInsert.add(newSong)
                                             }
@@ -333,7 +363,9 @@ constructor(
                                 val pathsToDelete =
                                         existingPaths.filter { !allFoundPaths.contains(it) }
                                 if (pathsToDelete.isNotEmpty()) {
-                                    pathsToDelete.forEach { songDao.deleteByPath(account.id, it) }
+                                    pathsToDelete.chunked(DELETE_BATCH_SIZE).forEach { chunk ->
+                                        songDao.deleteByPaths(account.id, chunk)
+                                    }
                                 }
                             }
                             emit(SyncState.Success(processedCount))
@@ -561,6 +593,19 @@ constructor(
             val album: String,
             val artworkPath: String?
     )
+
+    private fun hasSongContentChanged(oldSong: Song, newSong: Song): Boolean {
+        return oldSong.displayName != newSong.displayName ||
+                oldSong.title != newSong.title ||
+                oldSong.artist != newSong.artist ||
+                oldSong.album != newSong.album ||
+                oldSong.size != newSong.size ||
+                oldSong.mimeType != newSong.mimeType ||
+                oldSong.localPath != newSong.localPath ||
+                oldSong.artworkPath != newSong.artworkPath ||
+                oldSong.isCached != newSong.isCached ||
+                oldSong.isMetadataVerified != newSong.isMetadataVerified
+    }
 
     private fun guessAlbumFromUrl(url: String): String {
         try {

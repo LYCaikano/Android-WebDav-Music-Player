@@ -43,6 +43,9 @@ interface SongDao {
     @Query("DELETE FROM songs WHERE accountId = :accountId AND remotePath = :path")
     suspend fun deleteByPath(accountId: Long, path: String)
 
+    @Query("DELETE FROM songs WHERE accountId = :accountId AND remotePath IN (:paths)")
+    suspend fun deleteByPaths(accountId: Long, paths: List<String>)
+
     @Query("UPDATE songs SET localPath = NULL")
     suspend fun clearAllLocalPaths()
 

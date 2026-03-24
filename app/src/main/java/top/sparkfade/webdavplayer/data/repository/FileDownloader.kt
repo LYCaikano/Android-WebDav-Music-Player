@@ -51,67 +51,77 @@ class FileDownloader @Inject constructor(
                 .header("User-Agent", "WebDavPlayer/1.0")
                 .build()
 
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful || response.body == null) {
-                response.close()
-                emit(DownloadStatus.Error)
-                return@flow
-            }
+            client.newCall(request).execute().use { response ->
+                val body = response.body
+                if (!response.isSuccessful || body == null) {
+                    emit(DownloadStatus.Error)
+                    return@flow
+                }
 
-            val body = response.body!!
-            val contentLength = body.contentLength()
-            val inputStream = body.byteStream()
+                val contentLength = body.contentLength()
+                val baseDir = context.getExternalFilesDir("music_downloads")
+                if (baseDir == null) {
+                    emit(DownloadStatus.Error)
+                    return@flow
+                }
 
-            val dir = File(context.getExternalFilesDir("music_downloads"), "")
-            if (!dir.exists()) dir.mkdirs()
-            
-            // 使用临时文件，避免下载一半被误读
-            val file = File(dir, "${song.id}_${song.displayName.replace("/", "_")}")
-            val tempFile = File(dir, "${file.name}.tmp")
-            
-            val outputStream = FileOutputStream(tempFile)
-            val buffer = ByteArray(8 * 1024)
-            var bytesRead: Int
-            var totalBytesRead = 0L
-            
-            // 进度发射限流 (避免卡死 UI)
-            var lastEmitTime = 0L
+                val dir = File(baseDir, "")
+                if (!dir.exists()) dir.mkdirs()
 
-            try {
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-                    
-                    if (contentLength > 0) {
-                        val currentTime = System.currentTimeMillis()
-                        // 每 100ms 更新一次进度
-                        if (currentTime - lastEmitTime > 100) {
-                            val progress = totalBytesRead.toFloat() / contentLength.toFloat()
-                            emit(DownloadStatus.Progress(progress))
-                            lastEmitTime = currentTime
+                // 使用临时文件，避免下载一半被误读
+                val safeName = song.displayName.replace("/", "_").replace("\\", "_")
+                val file = File(dir, "${song.id}_$safeName")
+                val tempFile = File(dir, "${file.name}.tmp")
+
+                val buffer = ByteArray(8 * 1024)
+                var totalBytesRead = 0L
+                var lastEmitTime = 0L
+
+                try {
+                    body.byteStream().use { inputStream ->
+                        FileOutputStream(tempFile).use { outputStream ->
+                            var bytesRead: Int
+                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                outputStream.write(buffer, 0, bytesRead)
+                                totalBytesRead += bytesRead
+
+                                if (contentLength > 0) {
+                                    val currentTime = System.currentTimeMillis()
+                                    if (currentTime - lastEmitTime > 100) {
+                                        val progress =
+                                                totalBytesRead.toFloat() / contentLength.toFloat()
+                                        emit(DownloadStatus.Progress(progress))
+                                        lastEmitTime = currentTime
+                                    }
+                                }
+                            }
+                            outputStream.flush()
                         }
                     }
-                }
-                
-                outputStream.flush()
-                // 成功后重命名
-                if (file.exists()) file.delete()
-                tempFile.renameTo(file)
-                
-                // 更新数据库路径
-                val updatedSong = song.copy(localPath = file.absolutePath)
-                songDao.update(updatedSong)
-                
-                emit(DownloadStatus.Success)
 
-            } catch (e: Exception) {
-                tempFile.delete() // 失败删除临时文件
-                e.printStackTrace()
-                emit(DownloadStatus.Error)
-            } finally {
-                outputStream.close()
-                inputStream.close()
-                response.close()
+                    if (contentLength > 0) {
+                        emit(DownloadStatus.Progress(1f))
+                    }
+
+                    if (file.exists() && !file.delete()) {
+                        tempFile.delete()
+                        emit(DownloadStatus.Error)
+                        return@flow
+                    }
+                    if (!tempFile.renameTo(file)) {
+                        tempFile.delete()
+                        emit(DownloadStatus.Error)
+                        return@flow
+                    }
+
+                    val updatedSong = song.copy(localPath = file.absolutePath)
+                    songDao.update(updatedSong)
+                    emit(DownloadStatus.Success)
+                } catch (e: Exception) {
+                    tempFile.delete()
+                    e.printStackTrace()
+                    emit(DownloadStatus.Error)
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()

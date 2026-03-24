@@ -130,7 +130,7 @@ fun LoginScreen(
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = skipSsl, onCheckedChange = { skipSsl = it })
-            Text("Skip SSL Validation")
+            Text("Ignore SSL Verification")
         }
 
         Spacer(Modifier.height(16.dp))

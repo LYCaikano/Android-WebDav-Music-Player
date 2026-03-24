@@ -8,9 +8,10 @@ import androidx.datastore.preferences.preferencesDataStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
-import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
+import okhttp3.TlsVersion
 import okhttp3.logging.HttpLoggingInterceptor
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -39,9 +40,16 @@ object NetworkModule {
     @SafeClient
     fun provideSafeOkHttpClient(): OkHttpClient {
         return OkHttpClient.Builder()
+            .connectionSpecs(
+                listOf(
+                    ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                        .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
+                        .allEnabledCipherSuites()
+                        .build()
+                )
+            )
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
-            .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
             .build()
     }
 
@@ -50,10 +58,17 @@ object NetworkModule {
     @UnsafeClient
     fun provideUnsafeOkHttpClient(): OkHttpClient {
         return try {
-            // 创建不验证证书的 TrustManager
             val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun checkClientTrusted(
+                    chain: Array<out X509Certificate>?,
+                    authType: String?
+                ) {}
+
+                override fun checkServerTrusted(
+                    chain: Array<out X509Certificate>?,
+                    authType: String?
+                ) {}
+
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
 
@@ -62,10 +77,14 @@ object NetworkModule {
 
             OkHttpClient.Builder()
                 .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
-                .hostnameVerifier { _, _ -> true } // 信任所有 Hostname
+                .hostnameVerifier { _, _ -> true }
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(60, TimeUnit.SECONDS)
-                .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
+                .addInterceptor(
+                    HttpLoggingInterceptor().apply {
+                        level = HttpLoggingInterceptor.Level.BASIC
+                    }
+                )
                 .build()
         } catch (e: Exception) {
             throw RuntimeException(e)

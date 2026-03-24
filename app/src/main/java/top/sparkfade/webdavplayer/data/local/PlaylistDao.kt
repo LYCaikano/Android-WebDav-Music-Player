@@ -26,6 +26,9 @@ interface PlaylistDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun addSongToPlaylist(crossRef: PlaylistSongCrossRef)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addSongsToPlaylist(crossRefs: List<PlaylistSongCrossRef>)
+
     // [新增] 批量添加 (用于保存播放队列)
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylistSongCrossRefs(crossRefs: List<PlaylistSongCrossRef>)

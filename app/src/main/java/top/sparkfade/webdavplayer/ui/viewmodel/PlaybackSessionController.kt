@@ -75,6 +75,7 @@ class PlaybackSessionController(
     val playbackMode = MutableStateFlow(0)
     private var bufferingTimeoutJob: Job? = null
     private var consecutiveErrorCount = 0
+    private var lastSavedPlaybackBucket = -1L
 
     private val _playbackError =
             kotlinx.coroutines.channels.Channel<String>(
@@ -582,6 +583,7 @@ class PlaybackSessionController(
 
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         updateCurrentSongById(mediaItem?.mediaId)
+                        lastSavedPlaybackBucket = -1L
                         playbackProgress.value = 0L
                         bufferedPosition.value = 0L
                         playbackDuration.value = 1L
@@ -932,7 +934,9 @@ class PlaybackSessionController(
                         val currentPos = player.currentPosition
                         playbackProgress.value = currentPos
                         playbackDuration.value = player.duration.coerceAtLeast(1L)
-                        if (currentPos % 5000 < 500) {
+                        val bucket = currentPos / 5000
+                        if (bucket != lastSavedPlaybackBucket) {
+                            lastSavedPlaybackBucket = bucket
                             savePlaybackState(currentPos)
                         }
                     }
