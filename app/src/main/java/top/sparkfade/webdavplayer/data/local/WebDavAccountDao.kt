@@ -14,6 +14,9 @@ interface WebDavAccountDao {
     @Query("SELECT * FROM accounts")
     fun getAllAccounts(): Flow<List<WebDavAccount>>
 
+    @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1")
+    suspend fun getAccountById(id: Long): WebDavAccount?
+
     @Query("SELECT * FROM accounts")
     suspend fun getAllAccountsList(): List<WebDavAccount>
 

@@ -1,71 +1,68 @@
 package top.sparkfade.webdavplayer.ui.viewmodel
 
 import android.app.Application
-import android.content.ComponentName
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
-import android.net.Uri
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
-import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionToken
-import com.google.common.util.concurrent.ListenableFuture
-import com.google.common.util.concurrent.MoreExecutors
 import dagger.hilt.android.lifecycle.HiltViewModel
-import java.io.File
-import java.io.FileOutputStream
-import java.net.URLDecoder
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import top.sparkfade.webdavplayer.data.model.Playlist
 import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
 import top.sparkfade.webdavplayer.data.repository.CacheRepository
 import top.sparkfade.webdavplayer.data.repository.FileDownloader
 import top.sparkfade.webdavplayer.data.repository.MusicRepository
-import top.sparkfade.webdavplayer.service.PlaybackService
-import top.sparkfade.webdavplayer.utils.CurrentSession
 import top.sparkfade.webdavplayer.utils.dataStore
 
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class MainViewModel
 @Inject
 constructor(
         app: Application,
         private val repository: MusicRepository,
-        private val downloader: FileDownloader,
-        private val cacheRepository: CacheRepository
+        downloader: FileDownloader,
+        cacheRepository: CacheRepository
 ) : AndroidViewModel(app) {
 
     private val _startDestination = MutableStateFlow<String?>(null)
     val startDestination = _startDestination.asStateFlow()
 
     val allSongs: StateFlow<List<Song>> =
-            repository.allSongs.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            repository.allSongs.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val allAccounts: StateFlow<List<WebDavAccount>> =
-            repository.allAccounts.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            repository.allAccounts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val playbackSession =
+            PlaybackSessionController(
+                    app = app,
+                    scope = viewModelScope,
+                    repository = repository,
+                    downloader = downloader,
+                    cacheRepository = cacheRepository,
+                    allSongs = allSongs
+            )
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
 
-    private val _downloadProgressMap = MutableStateFlow<Map<Long, Float>>(emptyMap())
-    val downloadProgressMap = _downloadProgressMap.asStateFlow()
+    val downloadProgressMap = playbackSession.downloadProgressMap
 
     fun onSearchQueryChanged(query: String) {
         _searchQuery.value = query
@@ -75,43 +72,37 @@ constructor(
             combine(allSongs, _searchQuery) { songs, query ->
                         if (query.isBlank()) songs else songs.filter { matchSearch(it, query) }
                     }
-                    .flowOn(Dispatchers.Default)
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    val albums =
+    val albums: StateFlow<List<AlbumData>> =
             combine(allSongs, _searchQuery) { songs, query ->
-                        songs
-                                .groupBy { it.album }
+                        songs.groupBy { it.album }
                                 .map { (name, list) ->
-                                    val art = list.find { it.artworkPath != null }?.artworkPath
                                     AlbumData(
-                                            name,
-                                            list.firstOrNull()?.artist ?: "Unknown",
-                                            art,
-                                            list.size,
-                                            list
+                                            name = name,
+                                            artist = list.firstOrNull()?.artist ?: "Unknown",
+                                            artPath = list.find { it.artworkPath != null }?.artworkPath,
+                                            count = list.size,
+                                            songs = list
                                     )
                                 }
                                 .filter { it.name != "Unknown" }
                                 .filter {
-                                    if (query.isBlank()) true
-                                    else
+                                    query.isBlank() ||
                                             it.name.contains(query, ignoreCase = true) ||
-                                                    it.artist.contains(query, ignoreCase = true)
+                                            it.artist.contains(query, ignoreCase = true)
                                 }
                                 .sortedBy { it.name }
                     }
-                    .flowOn(Dispatchers.Default)
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    val artists =
+    val artists: StateFlow<List<ArtistData>> =
             combine(allSongs, _searchQuery) { songs, query ->
                         val artistMap = mutableMapOf<String, MutableList<Song>>()
 
                         songs.forEach { song ->
                             val splitNames =
-                                    song.artist
-                                            .split(artistSeparatorRegex)
+                                    song.artist.split(artistSeparatorRegex)
                                             .map { it.trim() }
                                             .filter { it.isNotBlank() && it != "Unknown" }
 
@@ -124,15 +115,10 @@ constructor(
                             }
                         }
 
-                        artistMap
-                                .map { (name, list) -> ArtistData(name, list.size, list) }
-                                .filter {
-                                    if (query.isBlank()) true
-                                    else it.name.contains(query, ignoreCase = true)
-                                }
+                        artistMap.map { (name, list) -> ArtistData(name, list.size, list) }
+                                .filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
                                 .sortedBy { it.name }
                     }
-                    .flowOn(Dispatchers.Default)
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val playlists: StateFlow<List<Playlist>> =
@@ -141,47 +127,57 @@ constructor(
                         if (query.isBlank()) visibleList
                         else visibleList.filter { it.name.contains(query, ignoreCase = true) }
                     }
-                    .flowOn(Dispatchers.Default)
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    private fun matchSearch(song: Song, query: String): Boolean {
-        return song.title.contains(query, ignoreCase = true) ||
-                song.artist.contains(query, ignoreCase = true) ||
-                song.displayName.contains(query, ignoreCase = true)
-    }
+    val playerController = playbackSession.playerController
+    val currentPlayingSong = playbackSession.currentPlayingSong
+    val isPlaying = playbackSession.isPlaying
+    val isBuffering = playbackSession.isBuffering
+    val playbackProgress = playbackSession.playbackProgress
+    val bufferedPosition = playbackSession.bufferedPosition
+    val playbackDuration = playbackSession.playbackDuration
+    val playbackMode = playbackSession.playbackMode
+    val playbackError = playbackSession.playbackError
+    val currentPlaylist = playbackSession.currentPlaylist
+    val isCurrentSongFavorite = playbackSession.isCurrentSongFavorite
+    val cacheSize = playbackSession.cacheSize
+    val coverCacheSize = playbackSession.coverCacheSize
+    val albumRenameFlow = playbackSession.albumRenameFlow
 
-    private val _playerController = MutableStateFlow<Player?>(null)
-    val playerController = _playerController.asStateFlow()
-    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private val _themeMode = MutableStateFlow(0)
+    val themeMode = _themeMode.asStateFlow()
+    private val _accountToEdit = MutableStateFlow<WebDavAccount?>(null)
+    val accountToEdit = _accountToEdit.asStateFlow()
+    private val _accountSyncStatus = MutableStateFlow<Map<Long, String>>(emptyMap())
+    val accountSyncStatus = _accountSyncStatus.asStateFlow()
+    private val _isSyncingMap = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
+    val isSyncingMap = _isSyncingMap.asStateFlow()
 
-    private val _currentPlayingSong = MutableStateFlow<Song?>(null)
-    val currentPlayingSong = _currentPlayingSong.asStateFlow()
-
-    val isPlaying = MutableStateFlow(false)
-    val isBuffering = MutableStateFlow(false)
-    val playbackProgress = MutableStateFlow(0L)
-    val bufferedPosition = MutableStateFlow(0L)
-    val playbackDuration = MutableStateFlow(1L)
-    val playbackMode = MutableStateFlow(0)
-    private var bufferingTimeoutJob: Job? = null
-    private var consecutiveErrorCount = 0 // 连续错误计数器，防止无限跳曲
-
-    // 播放错误消息通道
-    private val _playbackError =
-            kotlinx.coroutines.channels.Channel<String>(
-                    kotlinx.coroutines.channels.Channel.CONFLATED
-            )
-    val playbackError = _playbackError.receiveAsFlow()
-
-    private val _currentPlaylist = MutableStateFlow<List<Song>>(emptyList())
-    val currentPlaylist = _currentPlaylist.asStateFlow()
-
-    val isCurrentSongFavorite: StateFlow<Boolean> =
-            _currentPlayingSong
-                    .flatMapLatest { song ->
-                        if (song == null) flowOf(false) else repository.isFavorite(song.id)
+    val scanningStatus: StateFlow<String?> =
+            combine(_isSyncingMap, _accountSyncStatus) { syncingMap, statusMap ->
+                        val syncingId = syncingMap.entries.find { it.value }?.key
+                        if (syncingId != null) statusMap[syncingId] else null
                     }
-                    .stateIn(viewModelScope, SharingStarted.Lazily, false)
+                    .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    private val artistSeparatorRegex =
+            Regex("[,;&/|、＆，；]|\\s+(?i)(feat\\.?|ft\\.?|vs\\.?|cv\\.?)\\s+")
+
+    init {
+        viewModelScope.launch {
+            repository.initDefaultPlaylists()
+            val prefs = getApplication<Application>().dataStore.data.first()
+            _themeMode.value = prefs[intPreferencesKey("theme_mode")] ?: 0
+            val accounts = repository.allAccounts.first()
+            playbackSession.initializeSession(accounts)
+            if (accounts.isNotEmpty()) {
+                _startDestination.value = "main"
+                playbackSession.restorePlaybackState()
+            } else {
+                _startDestination.value = "login"
+            }
+        }
+    }
 
     fun getPlaylistsWithStatus(songId: Long): Flow<List<Pair<Playlist, Boolean>>> {
         return combine(repository.allPlaylists, repository.getPlaylistIdsForSong(songId)) {
@@ -193,23 +189,7 @@ constructor(
         }
     }
 
-    fun addToQueue(song: Song) {
-        val currentList = _currentPlaylist.value.toMutableList()
-        // 防止重复添加
-        if (currentList.none { it.id == song.id }) {
-            val controller = _playerController.value
-            if (controller != null) {
-                val item = buildMediaItem(song)
-                controller.addMediaItem(item)
-            }
-
-            currentList.add(song)
-            _currentPlaylist.value = currentList
-
-            // 更新数据库 (ID=3 是 Queue播放列表)
-            viewModelScope.launch { repository.addToPlaylist(3, song.id) }
-        }
-    }
+    fun addToQueue(song: Song) = playbackSession.addToQueue(song)
 
     fun addSongsToPlaylist(playlistId: Long, songIds: List<Long>) {
         viewModelScope.launch {
@@ -224,18 +204,7 @@ constructor(
         }
     }
 
-    fun toggleFavorite() {
-        val song = _currentPlayingSong.value ?: return
-        val isFav = isCurrentSongFavorite.value
-        viewModelScope.launch {
-            if (isFav) repository.removeFromPlaylist(1, song.id)
-            else repository.addToPlaylist(1, song.id)
-        }
-    }
-
-    //    fun addSongToPlaylist(playlistId: Long, songId: Long) {
-    //        viewModelScope.launch { repository.addToPlaylist(playlistId, songId) }
-    //    }
+    fun toggleFavorite() = playbackSession.toggleFavorite()
 
     fun createPlaylist(name: String) {
         viewModelScope.launch { repository.createPlaylist(name) }
@@ -255,14 +224,9 @@ constructor(
             "artist" ->
                     allSongs.map { list ->
                         list.filter { song ->
-                            // 使用相同的正则切割，判断当前歌手是否包含在其中
-                            val splitNames =
-                                    song.artist.split(artistSeparatorRegex).map { it.trim() }
-
-                            // 只要切割后的列表中包含目标歌手名就认为匹配
-                            splitNames.any { it.equals(idOrName, ignoreCase = true) }
-                            // 完全相等作为兜底
-                            || song.artist.equals(idOrName, ignoreCase = true)
+                            val splitNames = song.artist.split(artistSeparatorRegex).map { it.trim() }
+                            splitNames.any { it.equals(idOrName, ignoreCase = true) } ||
+                                    song.artist.equals(idOrName, ignoreCase = true)
                         }
                     }
             "playlist" -> repository.getPlaylistSongs(idOrName.toLongOrNull() ?: -1L)
@@ -270,882 +234,70 @@ constructor(
         }
     }
 
-    private val _isLoggedIn = MutableStateFlow(false)
-    // val isLoggedIn = _isLoggedIn.asStateFlow()
-    val cacheSize = MutableStateFlow(0L)
-    val coverCacheSize = MutableStateFlow(0L)
-    private val _themeMode = MutableStateFlow(0)
-    val themeMode = _themeMode.asStateFlow()
-    private val _accountToEdit = MutableStateFlow<WebDavAccount?>(null)
-    val accountToEdit = _accountToEdit.asStateFlow()
-    private val _accountSyncStatus = MutableStateFlow<Map<Long, String>>(emptyMap())
-    val accountSyncStatus = _accountSyncStatus.asStateFlow()
-    private val _isSyncingMap = MutableStateFlow<Map<Long, Boolean>>(emptyMap())
-    val isSyncingMap = _isSyncingMap.asStateFlow()
+    fun playSong(song: Song, playlist: List<Song>) = playbackSession.playSong(song, playlist)
 
-    // 如果有任意账号正在同步，返回其状态文字；否则返回 null
-    val scanningStatus: StateFlow<String?> =
-            combine(_isSyncingMap, _accountSyncStatus) { syncingMap, statusMap ->
-                        // 找到第一个正在同步的账号 ID
-                        val syncingId = syncingMap.entries.find { it.value }?.key
-                        if (syncingId != null) {
-                            statusMap[syncingId]
-                        } else {
-                            null
-                        }
-                    }
-                    .stateIn(viewModelScope, SharingStarted.Lazily, null)
+    fun skipToQueueItem(index: Int) = playbackSession.skipToQueueItem(index)
 
-    private val _albumRenameChannel =
-            kotlinx.coroutines.channels.Channel<Pair<String, String>>(
-                    kotlinx.coroutines.channels.Channel.BUFFERED
-            )
-    val albumRenameFlow = _albumRenameChannel.receiveAsFlow()
-    private val artistSeparatorRegex =
-            Regex("[,;&/|、＆，；]|\\s+(?i)(feat\\.?|ft\\.?|vs\\.?|cv\\.?)\\s+")
+    fun skipToNext() = playbackSession.skipToNext()
 
-    init {
-        viewModelScope.launch {
-            repository.initDefaultPlaylists()
-            val prefs = getApplication<Application>().dataStore.data.first()
-            _themeMode.value = prefs[intPreferencesKey("theme_mode")] ?: 0
-            val accounts = repository.allAccounts.first()
-            CurrentSession.clear()
-            accounts.forEach { acc ->
-                val auth = okhttp3.Credentials.basic(acc.username, acc.password)
-                CurrentSession.updateAuth(acc.url, auth)
-            }
-            if (accounts.isNotEmpty()) {
-                _isLoggedIn.value = true
-                _startDestination.value = "main"
-                restorePlaybackState()
-            } else {
-                _startDestination.value = "login"
-            }
-        }
-        initController(app)
-        startProgressUpdater()
-        refreshStorageInfo()
+    fun skipToPrevious() = playbackSession.skipToPrevious()
+
+    fun togglePlayPause() = playbackSession.togglePlayPause()
+
+    fun togglePlaybackMode() = playbackSession.togglePlaybackMode()
+
+    fun seekTo(pos: Long) = playbackSession.seekTo(pos)
+
+    fun downloadSong(song: Song) = playbackSession.downloadSong(song)
+
+    fun deleteLocalSong(song: Song) = playbackSession.deleteLocalSong(song)
+
+    fun setEditingAccount(account: WebDavAccount?) {
+        _accountToEdit.value = account
     }
 
-    private fun restorePlaybackState() {
-        viewModelScope.launch {
-            val prefs = getApplication<Application>().dataStore.data.first()
-            val lastSongId = prefs[longPreferencesKey("last_song_id")] ?: -1L
-            val lastPos = prefs[longPreferencesKey("last_pos")] ?: 0L
-
-            if (lastSongId != -1L) {
-                val queue = repository.getQueueSync()
-                if (queue.isNotEmpty()) {
-                    _currentPlaylist.value = queue
-                }
-                val song = repository.getSongById(lastSongId)
-                if (song != null) {
-                    _currentPlayingSong.value = song
-                    playbackProgress.value = lastPos
-                    playbackDuration.value = 1L
-                    while (_playerController.value == null) {
-                        delay(100)
-                    }
-                    val controller = _playerController.value!!
-                    if (queue.isNotEmpty()) {
-                        val index = queue.indexOfFirst { it.id == song.id }
-                        if (index != -1) {
-                            prepareMediaItems(controller, queue, index, lastPos, false)
-                        } else {
-                            prepareMediaItemForRestoration(controller, song, lastPos)
-                        }
-                    } else {
-                        prepareMediaItemForRestoration(controller, song, lastPos)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun prepareMediaItemForRestoration(controller: Player, song: Song, pos: Long) {
-        val item = buildMediaItem(song)
-        controller.setMediaItem(item)
-        controller.prepare()
-        controller.seekTo(pos)
-        controller.pause()
-    }
-
-    private fun prepareMediaItems(
-            controller: Player,
-            songs: List<Song>,
-            startIndex: Int,
-            startPos: Long,
-            autoPlay: Boolean
-    ) {
-        val items = songs.map { buildMediaItem(it) }
-        controller.setMediaItems(items, startIndex, startPos)
-        controller.prepare()
-        if (autoPlay) controller.play() else controller.pause()
-    }
-
-    private fun buildMediaItem(item: Song): MediaItem {
-        val metaBuilder = MediaMetadata.Builder()
-        if (item.title != "Unknown" && item.title != item.displayName)
-                metaBuilder.setTitle(item.title)
-        if (item.artist != "Unknown") metaBuilder.setArtist(item.artist)
-        if (item.album != "Unknown Album") metaBuilder.setAlbumTitle(item.album)
-
-        val uri =
-                if (item.localPath != null && File(item.localPath).exists()) {
-                    Uri.fromFile(File(item.localPath))
-                } else {
-                    val safeUrl =
-                            try {
-                                // 使用扩展函数处理 URL
-                                item.remotePath.toHttpUrlOrNull()?.toString() ?: item.remotePath
-                            } catch (e: Exception) {
-                                item.remotePath
-                            }
-                    Uri.parse(safeUrl)
-                }
-
-        val mimeType =
-                when {
-                    item.remotePath.endsWith(".mp3", true) -> MimeTypes.AUDIO_MPEG
-                    item.remotePath.endsWith(".flac", true) -> MimeTypes.AUDIO_FLAC
-                    item.remotePath.endsWith(".wav", true) -> MimeTypes.AUDIO_WAV
-                    item.remotePath.endsWith(".m4a", true) -> MimeTypes.AUDIO_MP4
-                    item.remotePath.endsWith(".aac", true) -> MimeTypes.AUDIO_AAC
-                    item.remotePath.endsWith(".ogg", true) -> MimeTypes.AUDIO_OGG
-                    item.remotePath.endsWith(".opus", true) -> MimeTypes.AUDIO_OPUS
-                    else -> MimeTypes.AUDIO_MPEG
-                }
-
-        return MediaItem.Builder()
-                .setMediaId(item.id.toString())
-                .setUri(uri)
-                .setMimeType(mimeType)
-                .setMediaMetadata(metaBuilder.build())
-                // 强制使用 Song ID 作为缓存键。
-                .setCustomCacheKey(item.id.toString())
-                .build()
-    }
-
-    private fun savePlaybackState(pos: Long) {
-        val song = _currentPlayingSong.value ?: return
-        viewModelScope.launch {
-            getApplication<Application>().dataStore.edit {
-                it[longPreferencesKey("last_song_id")] = song.id
-                it[longPreferencesKey("last_pos")] = pos
-            }
-        }
-    }
-
-    private fun initController(context: android.content.Context) {
-        val sessionToken =
-                SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
-        controllerFuture?.addListener(
-                {
-                    try {
-                        val controller = controllerFuture?.get()
-                        if (controller?.repeatMode == Player.REPEAT_MODE_OFF) {
-                            controller.repeatMode = Player.REPEAT_MODE_ALL
-                        }
-                        _playerController.value = controller
-                        setupPlayerListener(controller)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                },
-                MoreExecutors.directExecutor()
-        )
-    }
-
-    /**
-     * 在播放列表中查找距离当前位置最近的可离线播放歌曲索引。 优先向后搜索，同时向前搜索，返回距离最近的那一个。 可离线 = localPath != null (已下载) 或
-     * isCached == true (已完整缓冲)
-     * @return 播放列表中的索引，找不到则返回 -1
-     */
-    private fun findNearestOfflineIndex(currentIndex: Int): Int {
-        val playlist = _currentPlaylist.value
-        if (playlist.isEmpty()) return -1
-
-        fun Song.isAvailableOffline(): Boolean = localPath != null || isCached
-
-        // 同时向前和向后搜索，返回距离最近的
-        var forward = currentIndex + 1
-        var backward = currentIndex - 1
-        while (forward < playlist.size || backward >= 0) {
-            if (forward < playlist.size && playlist[forward].isAvailableOffline()) return forward
-            if (backward >= 0 && playlist[backward].isAvailableOffline()) return backward
-            forward++
-            backward--
-        }
-        return -1
-    }
-
-    /**
-     * 无网络时跳转到最近的离线可用歌曲；有网络时按原逻辑跳下一首。
-     * @return true 表示已处理（跳到了离线歌曲或停止播放），false 表示应走常规跳曲逻辑
-     */
-    private fun skipToOfflineOrStop(player: Player): Boolean {
-        if (isNetworkAvailable()) return false // 有网络，走常规逻辑
-
-        val currentIndex = player.currentMediaItemIndex
-        val offlineIdx = findNearestOfflineIndex(currentIndex)
-        if (offlineIdx != -1) {
-            player.seekToDefaultPosition(offlineIdx)
-            player.prepare()
-            player.play()
-            _currentPlayingSong.value = _currentPlaylist.value[offlineIdx]
-        } else {
-            // 没有任何离线歌曲，停止播放
-            player.stop()
-            isBuffering.value = false
-            _playbackError.trySend("无可用离线歌曲")
-        }
-        return true
-    }
-
-    private fun setupPlayerListener(player: Player?) {
-        player?.addListener(
-                object : Player.Listener {
-                    override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        this@MainViewModel.isPlaying.value = isPlaying
-                    }
-
-                    // 切歌逻辑
-                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                        updateCurrentSongById(mediaItem?.mediaId)
-                        playbackProgress.value = 0L
-                        bufferedPosition.value = 0L
-                        playbackDuration.value = 1L
-                        isBuffering.value = player.playbackState == Player.STATE_BUFFERING
-
-                        val current = _currentPlayingSong.value
-                        if (current != null) {
-                            viewModelScope.launch(Dispatchers.IO) {
-                                val sniffedSong = repository.sniffSongMetadata(current)
-
-                                val newTitle = sniffedSong.title
-                                val newArtist = sniffedSong.artist
-                                val newAlbum = sniffedSong.album
-
-                                // 只要新值不是 Unknown 且与当前不同，就认为是真实值
-                                fun shouldUpdate(newVal: String, oldVal: String): Boolean {
-                                    return newVal.isNotEmpty() &&
-                                            newVal != "Unknown" &&
-                                            newVal != "Unknown Album" &&
-                                            newVal != oldVal
-                                }
-
-                                // 只要有任何一项元数据不匹配且新数据有效，就触发更新
-                                if (shouldUpdate(newTitle, current.title) ||
-                                                shouldUpdate(newArtist, current.artist) ||
-                                                shouldUpdate(newAlbum, current.album)
-                                ) {
-                                    updateMetadataLogic(
-                                            targetSong = current,
-                                            realTitle = newTitle,
-                                            realArtist = newArtist,
-                                            realAlbum = newAlbum,
-                                            artworkData = null
-                                    )
-                                } else if (!current.isMetadataVerified) {
-                                    // 元数据一致但尚未验证，标记为已验证防止深度扫描覆盖
-                                    val verified = current.copy(isMetadataVerified = true)
-                                    repository.updateSong(verified)
-                                    withContext(Dispatchers.Main) {
-                                        _currentPlayingSong.value = verified
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState == Player.STATE_READY) {
-                            playbackDuration.value = player.duration.coerceAtLeast(1L)
-                            isBuffering.value = false
-                            consecutiveErrorCount = 0 // 播放成功，重置连续错误计数
-                            // 缓冲完成，取消超时任务
-                            bufferingTimeoutJob?.cancel()
-                            bufferingTimeoutJob = null
-                        } else if (playbackState == Player.STATE_ENDED) {
-                            bufferingTimeoutJob?.cancel()
-                            bufferingTimeoutJob = null
-                            if (player.mediaItemCount > 0) {
-                                if (player.shuffleModeEnabled) {
-                                    player.shuffleModeEnabled = false
-                                    player.shuffleModeEnabled = true
-                                }
-                                player.seekTo(0, 0)
-                                player.prepare()
-                                player.play()
-                                isBuffering.value = false
-                                isPlaying.value = true
-                            }
-                        } else if (playbackState == Player.STATE_BUFFERING) {
-                            isBuffering.value = true
-                            // 开始缓冲超时计时（5秒）
-                            bufferingTimeoutJob?.cancel()
-                            bufferingTimeoutJob =
-                                    viewModelScope.launch {
-                                        delay(5000)
-                                        // 5秒后仍在缓冲中，自动跳曲
-                                        if (isBuffering.value &&
-                                                        player.playbackState ==
-                                                                Player.STATE_BUFFERING
-                                        ) {
-                                            consecutiveErrorCount++
-                                            val noNetwork = !isNetworkAvailable()
-                                            val errorMsg =
-                                                    if (noNetwork) "No network connection"
-                                                    else "Playback timeout"
-                                            _playbackError.trySend(errorMsg)
-                                            withContext(Dispatchers.Main) {
-                                                val maxRetries =
-                                                        _currentPlaylist.value.size.coerceAtMost(3)
-                                                if (consecutiveErrorCount >= maxRetries) {
-                                                    // 连续错误过多，停止播放
-                                                    player.stop()
-                                                    isBuffering.value = false
-                                                    consecutiveErrorCount = 0
-                                                } else if (noNetwork) {
-                                                    skipToOfflineOrStop(player)
-                                                } else if (player.hasNextMediaItem()) {
-                                                    player.seekToNext()
-                                                } else {
-                                                    player.stop()
-                                                    isBuffering.value = false
-                                                }
-                                            }
-                                        }
-                                    }
-                        } else {
-                            isBuffering.value = false
-                            bufferingTimeoutJob?.cancel()
-                            bufferingTimeoutJob = null
-                        }
-                    }
-
-                    override fun onPlayerError(error: PlaybackException) {
-                        consecutiveErrorCount++
-                        val noNetwork = !isNetworkAvailable()
-                        val errorMsg = if (noNetwork) "No network connection" else "Playback error"
-                        _playbackError.trySend(errorMsg)
-                        isBuffering.value = false
-                        bufferingTimeoutJob?.cancel()
-                        bufferingTimeoutJob = null
-                        val maxRetries = _currentPlaylist.value.size.coerceAtMost(3)
-                        if (consecutiveErrorCount >= maxRetries) {
-                            // 连续错误过多，停止播放
-                            player.stop()
-                            consecutiveErrorCount = 0
-                        } else if (noNetwork) {
-                            // 无网络：跳到最近的离线可用歌曲
-                            skipToOfflineOrStop(player)
-                        } else if (player.hasNextMediaItem()) {
-                            player.seekToNext()
-                            player.prepare()
-                            player.play()
-                        } else {
-                            player.stop()
-                        }
-                    }
-
-                    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                        val realTitle = mediaMetadata.title?.toString()
-                        val realArtist = mediaMetadata.artist?.toString()
-                        val realAlbum = mediaMetadata.albumTitle?.toString()
-                        val artworkData = mediaMetadata.artworkData
-
-                        val current = _currentPlayingSong.value ?: return
-
-                        viewModelScope.launch(Dispatchers.IO) {
-                            updateMetadataLogic(
-                                    current,
-                                    realTitle,
-                                    realArtist,
-                                    realAlbum,
-                                    artworkData
-                            )
-                        }
-                    }
-                }
-        )
-
-        updateCurrentSongById(player?.currentMediaItem?.mediaId)
-        this.isPlaying.value = player?.isPlaying == true
-        this.isBuffering.value = player?.playbackState == Player.STATE_BUFFERING
-        val mode =
-                if (player?.shuffleModeEnabled == true) 1
-                else if (player?.repeatMode == Player.REPEAT_MODE_ONE) 2 else 0
-        playbackMode.value = mode
-    }
-
-    // 1.4.3 元数据更新逻辑,优化储存空间
-    private suspend fun updateMetadataLogic(
-            targetSong: Song,
-            realTitle: String?,
-            realArtist: String?,
-            realAlbum: String?,
-            artworkData: ByteArray?
-    ) {
-        var updatedSong = targetSong
-        var dataChanged = false
-
-        fun isValid(s: String?): Boolean {
-            return !s.isNullOrEmpty() && s != "Unknown" && s != "Unknown Album"
-        }
-
-        fun isPlaceholder(album: String): Boolean {
-            val folderName =
-                    try {
-                        val path = targetSong.remotePath.substringBeforeLast('/')
-                        URLDecoder.decode(path, "UTF-8").substringAfterLast('/')
-                    } catch (e: Exception) {
-                        ""
-                    }
-
-            return album == "Unknown" ||
-                    album == "Unknown Album" ||
-                    album.equals("dav", true) ||
-                    album.equals("webdav", true) ||
-                    album == folderName
-        }
-
-        fun isImageValid(file: File): Boolean {
-            return try {
-                val options = android.graphics.BitmapFactory.Options()
-                options.inJustDecodeBounds = true
-                android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
-                options.outWidth > 0 && options.outHeight > 0
-            } catch (e: Exception) {
-                false
-            }
-        }
-
-        // --- 文本元数据更新 ---
-        val safeTitle = realTitle?.trim()
-        val safeArtist = realArtist?.trim()
-        val safeAlbum = realAlbum?.trim()
-
-        if (isValid(safeTitle) && safeTitle != targetSong.title) {
-            updatedSong = updatedSong.copy(title = safeTitle!!)
-            dataChanged = true
-        }
-
-        if (isValid(safeArtist) && safeArtist != targetSong.artist) {
-            updatedSong = updatedSong.copy(artist = safeArtist!!)
-            dataChanged = true
-        }
-
-        val currentIsPlaceholder = isPlaceholder(targetSong.album)
-        val newIsPlaceholder = safeAlbum.isNullOrEmpty() || isPlaceholder(safeAlbum)
-
-        if ((!newIsPlaceholder || currentIsPlaceholder) &&
-                        safeAlbum != targetSong.album &&
-                        !safeAlbum.isNullOrEmpty()
-        ) {
-            updatedSong = updatedSong.copy(album = safeAlbum)
-            dataChanged = true
-
-            if (!newIsPlaceholder) {
-                val folderPath =
-                        try {
-                            val path = targetSong.remotePath.substringBeforeLast('/')
-                            URLDecoder.decode(path, "UTF-8")
-                        } catch (e: Exception) {
-                            ""
-                        }
-                val oldAlbum = targetSong.album
-
-                if (currentIsPlaceholder) {
-                    val siblings =
-                            allSongs.value.filter {
-                                val itFolder =
-                                        try {
-                                            URLDecoder.decode(
-                                                    it.remotePath.substringBeforeLast('/'),
-                                                    "UTF-8"
-                                            )
-                                        } catch (e: Exception) {
-                                            ""
-                                        }
-                                itFolder == folderPath &&
-                                        it.album == oldAlbum &&
-                                        it.id != targetSong.id
-                            }
-                    if (siblings.isNotEmpty()) {
-                        siblings.forEach { sibling ->
-                            repository.updateSong(sibling.copy(album = safeAlbum))
-                        }
-                        _albumRenameChannel.trySend(oldAlbum to safeAlbum)
-                    }
-                }
-            }
-        }
-
-        // --- 封面处理 ---
-        // 1.4.3 优化储存空间
-        if (dataChanged || artworkData != null || targetSong.artworkPath == null) {
-            try {
-                var finalArtworkPath = updatedSong.artworkPath
-                var artChanged = false
-
-                val coversDir = File(getApplication<Application>().cacheDir, "covers")
-                if (!coversDir.exists()) coversDir.mkdirs()
-
-                // 计算路径哈希
-                val folderPathHash =
-                        try {
-                            val path = targetSong.remotePath.substringBeforeLast('/')
-                            URLDecoder.decode(path, "UTF-8").hashCode()
-                        } catch (e: Exception) {
-                            0
-                        }
-
-                // 文件定义
-                // 文件夹默认图
-                val folderCoverFile = File(coversDir, "dir_$folderPathHash.jpg")
-
-                // 专辑专属图 (优先)
-                val targetAlbumName = updatedSong.album
-                val hasValidAlbum = !isPlaceholder(targetAlbumName)
-                val albumCoverFile =
-                        if (hasValidAlbum) File(coversDir, "alb_${targetAlbumName.hashCode()}.jpg")
-                        else null
-
-                // 互斥写入
-                if (artworkData != null) {
-                    val tempFile = File(coversDir, "temp_${System.currentTimeMillis()}.tmp")
-                    try {
-                        val fos = FileOutputStream(tempFile)
-                        fos.write(artworkData)
-                        fos.flush()
-                        fos.fd.sync()
-                        fos.close()
-
-                        if (isImageValid(tempFile)) {
-                            // 如果有专辑名，就存为专辑图；否则存为文件夹图
-                            if (albumCoverFile != null) {
-                                tempFile.renameTo(albumCoverFile)
-                                finalArtworkPath = albumCoverFile.absolutePath
-                            } else {
-                                tempFile.renameTo(folderCoverFile)
-                                finalArtworkPath = folderCoverFile.absolutePath
-                            }
-                            artChanged = true
-                        } else {
-                            tempFile.delete()
-                        }
-                    } catch (e: Exception) {
-                        tempFile.delete()
-                        e.printStackTrace()
-                    }
-                }
-
-                // 读取逻辑 (层级回退)
-                else if (finalArtworkPath == null) {
-                    // 优先找专辑图
-                    if (albumCoverFile != null &&
-                                    albumCoverFile.exists() &&
-                                    isImageValid(albumCoverFile)
-                    ) {
-                        finalArtworkPath = albumCoverFile.absolutePath
-                        artChanged = true
-                    }
-                    // 找不到专辑图或者专辑名无效，就找文件夹默认图
-                    else if (folderCoverFile.exists() && isImageValid(folderCoverFile)) {
-                        finalArtworkPath = folderCoverFile.absolutePath
-                        artChanged = true
-                    }
-                }
-
-                if (dataChanged || artChanged) {
-                    val finalSong =
-                            updatedSong.copy(
-                                    artworkPath = finalArtworkPath,
-                                    isMetadataVerified = true
-                            )
-
-                    repository.updateSong(finalSong)
-
-                    if (_currentPlayingSong.value?.id == finalSong.id) {
-                        withContext(Dispatchers.Main) { _currentPlayingSong.value = finalSong }
-                    }
-
-                    val currentList = _currentPlaylist.value.toMutableList()
-                    val index = currentList.indexOfFirst { it.id == finalSong.id }
-                    if (index != -1) {
-                        currentList[index] = finalSong
-                        _currentPlaylist.value = currentList
-                    }
-
-                    if (artChanged) refreshStorageInfo()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun updateCurrentSongById(mediaId: String?) {
-        if (mediaId == null) return
-        val id = mediaId.toLongOrNull() ?: return
-        val song = allSongs.value.find { it.id == id }
-        if (song != null) _currentPlayingSong.value = song
-    }
-
-    fun playSong(song: Song, playlist: List<Song>) {
-        val controller = _playerController.value ?: return
-        consecutiveErrorCount = 0
-        _currentPlaylist.value = playlist
-        viewModelScope.launch { repository.updateQueue(playlist) }
-        val index = playlist.indexOfFirst { it.id == song.id }
-        if (index == -1) return
-        _currentPlayingSong.value = song
-        playbackProgress.value = 0L
-        bufferedPosition.value = 0L // Reset bufferedPosition here
-        playbackDuration.value = 1L
-        isBuffering.value = true
-        prepareMediaItems(controller, playlist, index, 0L, true)
-    }
-
-    fun skipToQueueItem(index: Int) {
-        val controller = _playerController.value ?: return
-        consecutiveErrorCount = 0
-        if (index in 0 until _currentPlaylist.value.size) {
-            val song = _currentPlaylist.value[index]
-            _currentPlayingSong.value = song
-            isBuffering.value = true
-            playbackProgress.value = 0L
-            controller.seekToDefaultPosition(index)
-            controller.play()
-        }
-    }
-
-    fun skipToNext() {
-        val player = _playerController.value ?: return
-        consecutiveErrorCount = 0
-        if (player.hasNextMediaItem()) {
-            isBuffering.value = true
-            player.seekToNext()
-        } else {
-            isBuffering.value = false
-        }
-    }
-
-    fun skipToPrevious() {
-        val player = _playerController.value ?: return
-        consecutiveErrorCount = 0
-        isBuffering.value = true
-        player.seekToPrevious()
-    }
-
-    fun togglePlayPause() {
-        val player = _playerController.value ?: return
-        consecutiveErrorCount = 0
-        if (player.isPlaying) {
-            player.pause()
-        } else {
-            // player.stop() 后进入 STATE_IDLE，需要先 prepare() 才能播放
-            if (player.playbackState == Player.STATE_IDLE) {
-                player.prepare()
-            }
-            player.play()
-        }
-    }
-
-    fun togglePlaybackMode() {
-        val controller = _playerController.value ?: return
-        val current = playbackMode.value
-        val next = (current + 1) % 3
-        playbackMode.value = next
-        when (next) {
-            0 -> {
-                controller.shuffleModeEnabled = false
-                controller.repeatMode = Player.REPEAT_MODE_ALL
-            }
-            1 -> {
-                controller.shuffleModeEnabled = true
-                controller.repeatMode = Player.REPEAT_MODE_ALL
-            }
-            2 -> {
-                controller.shuffleModeEnabled = false
-                controller.repeatMode = Player.REPEAT_MODE_ONE
-            }
-        }
-    }
-
-    fun seekTo(pos: Long) {
-        val player = _playerController.value ?: return
-        player.seekTo(pos)
-        isBuffering.value = true
-        playbackProgress.value = pos
-    }
-
-    fun downloadSong(song: Song) {
-        if (_downloadProgressMap.value.containsKey(song.id)) return // 防止重复点击
-
-        viewModelScope.launch {
-            // 立即加入Downloads歌单 (ID=2)，让用户能在下载列表中看到
-            repository.addToPlaylist(2, song.id)
-
-            // 开始下载并收集进度流
-            downloader.downloadSongFlow(getApplication(), song, true).collect { status ->
-                when (status) {
-                    is FileDownloader.DownloadStatus.Progress -> {
-                        // 更新进度 Map
-                        _downloadProgressMap.value =
-                                _downloadProgressMap.value + (song.id to status.progress)
-                    }
-                    is FileDownloader.DownloadStatus.Success -> {
-                        // 下载完成，移除进度条，刷新存储信息
-                        _downloadProgressMap.value = _downloadProgressMap.value - song.id
-                        refreshStorageInfo()
-                    }
-                    is FileDownloader.DownloadStatus.Error -> {
-                        // 下载失败，移除进度条，并从下载歌单中移除
-                        _downloadProgressMap.value = _downloadProgressMap.value - song.id
-                        repository.removeFromPlaylist(2, song.id)
-                    }
-                }
-            }
-        }
-    }
-
-    fun deleteLocalSong(s: Song) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                // 删除显式下载的文件
-                s.localPath?.let { File(it).delete() }
-
-                // 更新数据库状态
-                val updated = s.copy(localPath = null)
-                repository.updateSong(updated)
-
-                // 从下载歌单移除
-                repository.removeFromPlaylist(2, s.id)
-
-                // 1.4.2 移除 ExoPlayer 的在线播放缓存 ，解决缓存泄露
-                cacheRepository.removeResource(s.id.toString())
-
-                if (_currentPlayingSong.value?.id == s.id) {
-                    withContext(Dispatchers.Main) { _currentPlayingSong.value = updated }
-                }
-                refreshStorageInfo()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    fun setEditingAccount(a: WebDavAccount?) {
-        _accountToEdit.value = a
-    }
     fun saveAccount(
             id: Long,
-            n: String,
-            u: String,
-            us: String,
-            p: String,
-            s: Boolean,
-            d: Int,
-            cb: () -> Unit
+            name: String,
+            url: String,
+            username: String,
+            password: String,
+            skipSsl: Boolean,
+            scanDepth: Int,
+            callback: () -> Unit
     ) {
         viewModelScope.launch {
-            val acc = WebDavAccount(id, n, u, us, p, s, d)
-            val sid =
-                    if (id == 0L) repository.addAccount(acc)
+            val account = WebDavAccount(id, name, url, username, password, skipSsl, scanDepth)
+            val savedId =
+                    if (id == 0L) repository.addAccount(account)
                     else {
-                        repository.updateAccount(acc)
+                        repository.updateAccount(account)
                         id
                     }
-            refreshAccount(acc.copy(id = sid))
-            cb()
+            val savedAccount = account.copy(id = savedId)
+            playbackSession.initializeSession(repository.getAllAccountsList())
+            refreshAccount(savedAccount)
+            callback()
         }
     }
 
     fun deleteAccount(account: WebDavAccount) {
         viewModelScope.launch(Dispatchers.IO) {
-            // 获取该账户下所有的歌曲
             val songsToDelete = repository.getSongsByAccountId(account.id)
-            val coversDir = File(getApplication<Application>().cacheDir, "covers")
-
-            // 停止播放器
-            val current = _currentPlayingSong.value
-            if (current != null && current.accountId == account.id) {
-                withContext(Dispatchers.Main) {
-                    _playerController.value?.stop()
-                    _playerController.value?.clearMediaItems()
-                    _currentPlayingSong.value = null
-                    isPlaying.value = false
-                    playbackProgress.value = 0L
-                    playbackDuration.value = 1L
-                }
-            }
-
-            // 3. 清理播放队列
-            val currentQueue = _currentPlaylist.value
-            val newQueue = currentQueue.filter { it.accountId != account.id }
-            if (newQueue.size != currentQueue.size) {
-                _currentPlaylist.value = newQueue
-                repository.updateQueue(newQueue)
-            }
-
-            // 清理应该删除的文件
-            songsToDelete.forEach { song ->
-                try {
-                    // 删除下载的音频文件
-                    song.localPath?.let { path -> File(path).delete() }
-
-                    // 删除数据库记录的封面路径
-                    song.artworkPath?.let { path -> File(path).delete() }
-
-                    // 重新计算并删除可能存在的关联封面
-                    if (coversDir.exists()) {
-                        // 删除单曲封面
-                        File(coversDir, "song_${song.id}.jpg").delete()
-
-                        // 删除专辑图
-                        if (song.album != "Unknown" && song.album != "Unknown Album") {
-                            File(coversDir, "alb_${song.album.hashCode()}.jpg").delete()
-                        }
-
-                        // 删除文件夹默认图
-                        val folderPathHash =
-                                try {
-                                    URLDecoder.decode(
-                                                    song.remotePath.substringBeforeLast('/'),
-                                                    "UTF-8"
-                                            )
-                                            .hashCode()
-                                } catch (e: Exception) {
-                                    0
-                                }
-                        File(coversDir, "dir_$folderPathHash.jpg").delete()
-                    }
-
-                    // 删除在线播放缓存
-                    cacheRepository.removeResource(song.id.toString())
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            // 删除数据库记录
+            playbackSession.prepareForAccountDeletion(account, songsToDelete)
             repository.deleteAccount(account)
-
+            playbackSession.initializeSession(repository.getAllAccountsList())
             refreshStorageInfo()
         }
     }
 
-    fun refreshAccount(a: WebDavAccount, deepScan: Boolean = false) {
-        if (_isSyncingMap.value[a.id] == true) return
+    fun refreshAccount(account: WebDavAccount, deepScan: Boolean = false) {
+        if (_isSyncingMap.value[account.id] == true) return
         viewModelScope.launch {
-            _isSyncingMap.value = _isSyncingMap.value.toMutableMap().apply { put(a.id, true) }
+            _isSyncingMap.value = _isSyncingMap.value.toMutableMap().apply { put(account.id, true) }
             try {
-                repository.syncAccount(a, deepScan).collect { state ->
-                    val msg =
+                repository.syncAccount(account, deepScan).collect { state ->
+                    val message =
                             when (state) {
                                 is MusicRepository.SyncState.Loading ->
                                         if (deepScan) "Deep Scanning..." else "Scanning..."
@@ -1154,98 +306,32 @@ constructor(
                                 is MusicRepository.SyncState.Error -> "Error: ${state.message}"
                                 else -> ""
                             }
-                    if (msg.isNotEmpty())
-                            _accountSyncStatus.value =
-                                    _accountSyncStatus.value.toMutableMap().apply { put(a.id, msg) }
+                    if (message.isNotEmpty()) {
+                        _accountSyncStatus.value =
+                                _accountSyncStatus.value.toMutableMap().apply {
+                                    put(account.id, message)
+                                }
+                    }
                 }
             } finally {
-                _isSyncingMap.value = _isSyncingMap.value.toMutableMap().apply { put(a.id, false) }
+                _isSyncingMap.value = _isSyncingMap.value.toMutableMap().apply { put(account.id, false) }
             }
         }
     }
 
-    fun removeFromQueue(song: Song) {
-        // 禁止移除正在播放的歌曲
-        if (_currentPlayingSong.value?.id == song.id) return
+    fun removeFromQueue(song: Song) = playbackSession.removeFromQueue(song)
 
-        val currentList = _currentPlaylist.value.toMutableList()
-        val index = currentList.indexOfFirst { it.id == song.id }
+    suspend fun testConnection(url: String, username: String, password: String, skipSsl: Boolean) =
+            repository.testConnection(url, username, password, skipSsl)
 
-        if (index != -1) {
-            _playerController.value?.removeMediaItem(index)
+    fun refreshStorageInfo() = playbackSession.refreshStorageInfo()
 
-            currentList.removeAt(index)
-            _currentPlaylist.value = currentList
+    fun clearAudioCache() = playbackSession.clearAudioCache()
 
-            viewModelScope.launch { repository.removeFromPlaylist(3, song.id) }
-        }
-    }
+    fun clearImageCache() = playbackSession.clearImageCache()
 
-    suspend fun testConnection(u: String, n: String, p: String, s: Boolean) =
-            repository.testConnection(u, n, p, s)
-    fun refreshStorageInfo() {
-        viewModelScope.launch {
-            cacheSize.value = cacheRepository.getCacheSize()
-            coverCacheSize.value =
-                    cacheRepository.getCoverCacheSize(getApplication<Application>().cacheDir)
-        }
-    }
-    fun clearAudioCache() {
-        cacheRepository.clearAudioCache()
-        // -----清空所有在线播放产生的缓存: 待解决
-        try {
-            val cacheDir = File(getApplication<Application>().cacheDir, "media_cache")
-            if (cacheDir.exists()) {
-                cacheDir.deleteRecursively()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+    fun clearDownloads() = playbackSession.clearDownloads()
 
-        refreshStorageInfo()
-    }
-    fun clearImageCache() {
-        viewModelScope.launch(Dispatchers.IO) {
-            cacheRepository.clearCoverCache(getApplication<Application>().cacheDir)
-            repository.clearArtworkPaths()
-            refreshStorageInfo()
-        }
-    }
-    fun clearDownloads() {
-        viewModelScope.launch(Dispatchers.IO) {
-            // 1. 遍历所有已下载的歌曲，逐个清除其 ExoPlayer 缓存
-            val allSongsList = allSongs.value
-            allSongsList.filter { it.localPath != null }.forEach { song ->
-                cacheRepository.removeResource(song.id.toString())
-            }
-
-            // 2. 删除下载目录
-            cacheRepository.clearDownloads(
-                    getApplication<Application>().getExternalFilesDir("music_downloads")
-            )
-
-            // 3. 清除封面缓存（遍历删除 covers 目录）
-            val coversDir = java.io.File(getApplication<Application>().cacheDir, "covers")
-            if (coversDir.exists()) {
-                coversDir.deleteRecursively()
-                coversDir.mkdirs()
-            }
-
-            // 4. 清除数据库中的本地路径和封面路径
-            repository.clearLocalPaths()
-            repository.clearArtworkPaths()
-            repository.clearPlaylist(2)
-
-            // 5. 如果正在播放已下载歌曲，更新其状态
-            val current = _currentPlayingSong.value
-            if (current?.localPath != null) {
-                val updated = current.copy(localPath = null, artworkPath = null)
-                withContext(Dispatchers.Main) { _currentPlayingSong.value = updated }
-            }
-
-            refreshStorageInfo()
-        }
-    }
     fun setThemeMode(mode: Int) {
         _themeMode.value = mode
         viewModelScope.launch {
@@ -1255,42 +341,14 @@ constructor(
         }
     }
 
-    private fun startProgressUpdater() {
-        viewModelScope.launch {
-            while (true) {
-                _playerController.value?.let { player ->
-                    // 播放中更新播放进度
-                    if (player.isPlaying &&
-                                    !isBuffering.value &&
-                                    player.playbackState == Player.STATE_READY
-                    ) {
-                        val currentPos = player.currentPosition
-                        playbackProgress.value = currentPos
-                        playbackDuration.value = player.duration.coerceAtLeast(1L)
-                        if (currentPos % 5000 < 500) {
-                            savePlaybackState(currentPos)
-                        }
-                    }
-                    // 始终更新缓冲进度（任何状态下都读取真实值）
-                    bufferedPosition.value = player.bufferedPosition
-                }
-                delay(500)
-            }
-        }
+    private fun matchSearch(song: Song, query: String): Boolean {
+        return song.title.contains(query, ignoreCase = true) ||
+                song.artist.contains(query, ignoreCase = true) ||
+                song.displayName.contains(query, ignoreCase = true)
     }
 
-    private fun isNetworkAvailable(): Boolean {
-        val cm =
-                getApplication<Application>()
-                        .getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as
-                        ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
     override fun onCleared() {
-        playbackProgress.value.let { savePlaybackState(it) }
-        controllerFuture?.let { MediaController.releaseFuture(it) }
+        playbackSession.onCleared()
         super.onCleared()
     }
 
@@ -1301,5 +359,6 @@ constructor(
             val count: Int,
             val songs: List<Song>
     )
+
     data class ArtistData(val name: String, val count: Int, val songs: List<Song>)
 }

@@ -76,8 +76,10 @@ constructor(
 
     // --- 账号与歌曲管理 ---
     suspend fun addAccount(account: WebDavAccount): Long = accountDao.insert(account)
+    suspend fun getAllAccountsList(): List<WebDavAccount> = accountDao.getAllAccountsList()
     suspend fun updateAccount(account: WebDavAccount) = accountDao.update(account)
     suspend fun updateSong(song: Song) = songDao.update(song)
+    suspend fun getAccountById(id: Long): WebDavAccount? = accountDao.getAccountById(id)
     suspend fun deleteAccount(account: WebDavAccount) {
         accountDao.delete(account)
         songDao.clearByAccountId(account.id)
@@ -185,10 +187,12 @@ constructor(
                         }
 
                 val auth = CurrentSession.getAuthForUrl(safeUrl) ?: return@withContext song
+                val account = getAccountById(song.accountId)
+                val client = if (account?.skipSsl == true) unsafeClient else safeClient
                 val ext = song.remotePath.substringAfterLast('.', "").lowercase()
 
                 // 播放时读取 4MB
-                val meta = smartSniffMetadata(unsafeClient, safeUrl, auth, ext, 4 * 1024 * 1024L)
+                val meta = smartSniffMetadata(client, safeUrl, auth, ext, 4 * 1024 * 1024L)
 
                 if (meta.title != "Unknown") {
                     return@withContext song.copy(
