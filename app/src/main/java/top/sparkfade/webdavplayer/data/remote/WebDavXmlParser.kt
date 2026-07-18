@@ -95,6 +95,8 @@ class WebDavXmlParser {
                     parser.isLocalName("displayname") -> displayName = readText(parser)
                     parser.isLocalName("resourcetype") ->
                         if (readInnerResourceType(parser)) isCollection = true
+                    // prop 是属性容器，需要进入读取子标签，不能跳过
+                    parser.isLocalName("prop") -> Unit
                     else -> skip(parser)
                 }
                 XmlPullParser.END_TAG -> if (parser.isLocalName("propstat")) break

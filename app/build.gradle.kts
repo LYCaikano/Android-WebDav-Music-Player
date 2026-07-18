@@ -14,8 +14,8 @@ android {
         applicationId = "top.sparkfade.webdavplayer"
         minSdk = 31 // Android 12+
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.4.7"
+        versionCode = 8
+        versionName = "1.4.8"
         
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

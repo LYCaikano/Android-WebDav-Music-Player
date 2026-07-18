@@ -177,7 +177,12 @@ constructor(
             playlistDao.getPlaylistIdsForSong(songId)
 
     // --- 网络与同步 ---
-    suspend fun testConnection(url: String, user: String, pass: String, skipSsl: Boolean): Boolean =
+    suspend fun testConnection(
+            url: String,
+            user: String,
+            pass: String,
+            skipSsl: Boolean
+    ): WebDavDataSource.ConnectionResult =
             webDavDataSource.testConnection(url, user, pass, skipSsl)
 
     /** 播放时主动嗅探单曲元数据；已验证或已下载的歌曲直接跳过 */

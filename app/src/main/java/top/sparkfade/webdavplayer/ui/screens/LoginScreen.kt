@@ -19,6 +19,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
+import top.sparkfade.webdavplayer.data.remote.WebDavDataSource.ConnectionResult
 import top.sparkfade.webdavplayer.utils.Constants
 import kotlin.math.roundToInt
 
@@ -26,7 +27,7 @@ import kotlin.math.roundToInt
 fun LoginScreen(
     accountToEdit: WebDavAccount?,
     onSaveAccount: (Long, String, String, String, String, Boolean, Int) -> Unit,
-    onTestConnection: suspend (String, String, String, Boolean) -> Boolean
+    onTestConnection: suspend (String, String, String, Boolean) -> ConnectionResult
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -41,14 +42,23 @@ fun LoginScreen(
     var isTesting by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
 
+    fun describeResult(result: ConnectionResult): String = when (result) {
+        is ConnectionResult.Success -> "Success!"
+        is ConnectionResult.AuthFailed -> "Wrong username or password"
+        is ConnectionResult.Unreachable -> "Cannot connect to server, check the address"
+        is ConnectionResult.SslError -> "SSL certificate verification failed"
+        is ConnectionResult.OtherError ->
+            if (result.code == -1) "Connection failed" else "HTTP ${result.code}"
+    }
+
     val performTestConnection = {
         if (url.isNotBlank()) {
             focusManager.clearFocus()
             isTesting = true
             scope.launch {
-                val success = onTestConnection(url, username, password, skipSsl)
+                val result = onTestConnection(url, username, password, skipSsl)
                 isTesting = false
-                Toast.makeText(context, if (success) "Success!" else "Failed!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, describeResult(result), Toast.LENGTH_SHORT).show()
             }
         } else {
             Toast.makeText(context, "URL cannot be empty", Toast.LENGTH_SHORT).show()
@@ -162,9 +172,9 @@ fun LoginScreen(
                 if (url.isNotBlank() && username.isNotBlank()) {
                     isTesting = true
                     scope.launch {
-                        val success = onTestConnection(url, username, password, skipSsl)
+                        val result = onTestConnection(url, username, password, skipSsl)
                         isTesting = false
-                        if(success) {
+                        if (result is ConnectionResult.Success) {
                             isSaving = true
                             onSaveAccount(
                                 accountToEdit?.id ?: 0L,
@@ -172,7 +182,7 @@ fun LoginScreen(
                                 scanDepth.roundToInt()
                             )
                         } else {
-                            Toast.makeText(context,"Connection failed! Check settings.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, describeResult(result), Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

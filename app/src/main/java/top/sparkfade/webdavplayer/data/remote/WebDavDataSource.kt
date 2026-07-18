@@ -49,27 +49,71 @@ class WebDavDataSource @Inject constructor(
 
     data class SongMetadata(val title: String, val artist: String, val album: String)
 
+    /** 连接测试的细分结果 */
+    sealed interface ConnectionResult {
+        data object Success : ConnectionResult
+
+        /** 用户名或密码错误（HTTP 401/403） */
+        data object AuthFailed : ConnectionResult
+
+        /** 地址无法连接（DNS 解析失败、连接拒绝、超时等） */
+        data object Unreachable : ConnectionResult
+
+        /** SSL 证书校验失败 */
+        data object SslError : ConnectionResult
+
+        /** 其他失败：HTTP 状态码，非 HTTP 异常时 code 为 -1 */
+        data class OtherError(val code: Int) : ConnectionResult
+    }
+
     fun clientFor(skipSsl: Boolean): OkHttpClient = if (skipSsl) unsafeClient else safeClient
 
-    suspend fun testConnection(url: String, user: String, pass: String, skipSsl: Boolean): Boolean =
-        withContext(Dispatchers.IO) {
-            try {
-                val auth = okhttp3.Credentials.basic(user, pass)
-                val request = Request.Builder()
-                    .url(url)
-                    .header("Authorization", auth)
-                    .header("User-Agent", Constants.USER_AGENT)
-                    .header("Depth", "0")
-                    .method("PROPFIND", null)
-                    .build()
-                clientFor(skipSsl).newCall(request).execute().use { response ->
-                    return@withContext response.isSuccessful
+    suspend fun testConnection(
+        url: String,
+        user: String,
+        pass: String,
+        skipSsl: Boolean
+    ): ConnectionResult = withContext(Dispatchers.IO) {
+        try {
+            val auth = okhttp3.Credentials.basic(user, pass)
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", auth)
+                .header("User-Agent", Constants.USER_AGENT)
+                .header("Depth", "0")
+                .method("PROPFIND", null)
+                .build()
+            clientFor(skipSsl).newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> ConnectionResult.Success
+                    response.code == 401 || response.code == 403 -> ConnectionResult.AuthFailed
+                    else -> ConnectionResult.OtherError(response.code)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Test connection failed: ${e.message}")
-                false
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Test connection failed", e)
+            classifyConnectionError(e)
         }
+    }
+
+    private fun classifyConnectionError(e: Throwable): ConnectionResult {
+        var cause: Throwable? = e
+        while (cause != null) {
+            when (cause) {
+                is javax.net.ssl.SSLHandshakeException,
+                is javax.net.ssl.SSLPeerUnverifiedException,
+                is java.security.cert.CertificateException ->
+                    return ConnectionResult.SslError
+                is java.net.UnknownHostException,
+                is java.net.ConnectException,
+                is java.net.SocketTimeoutException,
+                is java.net.NoRouteToHostException ->
+                    return ConnectionResult.Unreachable
+            }
+            cause = cause.cause
+        }
+        return ConnectionResult.OtherError(-1)
+    }
 
     suspend fun crawl(baseUrl: String, auth: String, maxDepth: Int, skipSsl: Boolean): CrawlResult =
         withContext(Dispatchers.IO) {
