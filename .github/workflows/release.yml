@@ -1,0 +1,114 @@
+name: Release APK
+
+# 当 main 分支上的 app/build.gradle.kts（版本号）发生变化时自动触发；
+# 也可在 Actions 页面手动触发。若对应 tag 的 Release 已存在则跳过。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/build.gradle.kts'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from build.gradle.kts
+        id: version
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          VERSION_CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "Building version ${VERSION_NAME} (${VERSION_CODE})"
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.name }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 17
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        if: steps.check.outputs.exists == 'false'
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        if: steps.check.outputs.exists == 'false'
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build universal release APK (armeabi-v7a + arm64-v8a compatible)
+        if: steps.check.outputs.exists == 'false'
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Prepare signing keystore
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          # 优先使用仓库 Secrets 中的正式签名（KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD）；
+          # 未配置时回退到临时 debug 签名，保证 APK 可直接安装
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+            {
+              echo "KS_PATH=$RUNNER_TEMP/keystore.jks"
+              echo "KS_ALIAS=${{ secrets.KEY_ALIAS }}"
+              echo "KS_STORE_PASS=${{ secrets.KEYSTORE_PASSWORD }}"
+              echo "KS_KEY_PASS=${{ secrets.KEY_PASSWORD }}"
+            } >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -v \
+              -keystore "$RUNNER_TEMP/debug.keystore" \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+            {
+              echo "KS_PATH=$RUNNER_TEMP/debug.keystore"
+              echo "KS_ALIAS=androiddebugkey"
+              echo "KS_STORE_PASS=android"
+              echo "KS_KEY_PASS=android"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Zipalign and sign APK
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED="$RUNNER_TEMP/app-aligned.apk"
+          APK_NAME="WebDavMusic-v${{ steps.version.outputs.name }}.apk"
+
+          "$BUILD_TOOLS/zipalign" -v -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KS_PATH" \
+            --ks-key-alias "$KS_ALIAS" \
+            --ks-pass "pass:$KS_STORE_PASS" \
+            --key-pass "pass:$KS_KEY_PASS" \
+            --out "$APK_NAME" \
+            "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK_NAME"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release with APK
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.name }}
+          name: WebDavMusic v${{ steps.version.outputs.name }}
+          generate_release_notes: true
+          files: ${{ env.APK_NAME }}

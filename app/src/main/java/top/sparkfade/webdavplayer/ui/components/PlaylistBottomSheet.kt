@@ -82,7 +82,11 @@ fun PlaylistBottomSheet(
                                 ),
                         modifier = Modifier.fillMaxWidth().weight(1f)
                 ) {
-                    items(playlist.size) { index ->
+                    items(
+                            count = playlist.size,
+                            key = { index -> playlist[index].id },
+                            contentType = { "song" }
+                    ) { index ->
                         val song = playlist[index]
                         val isSelected = song.id == currentSong?.id
 

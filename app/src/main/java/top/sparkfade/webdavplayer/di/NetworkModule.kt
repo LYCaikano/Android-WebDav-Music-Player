@@ -1,10 +1,5 @@
 package top.sparkfade.webdavplayer.di
 
-import android.content.Context
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -13,6 +8,7 @@ import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
 import okhttp3.TlsVersion
 import okhttp3.logging.HttpLoggingInterceptor
+import top.sparkfade.webdavplayer.BuildConfig
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
@@ -26,11 +22,14 @@ import javax.net.ssl.X509TrustManager
 @InstallIn(SingletonComponent::class)
 object NetworkModule {
 
-    // 定义两个 Client，一个安全，一个不安全
     @Qualifier
     @Retention(AnnotationRetention.BINARY)
     annotation class SafeClient
 
+    /**
+     * 信任所有证书的客户端，仅用于用户在账号配置中显式勾选 skipSsl 的
+     * 仓库/下载请求。播放器请勿直接使用（见 MediaModule 的动态校验）。
+     */
     @Qualifier
     @Retention(AnnotationRetention.BINARY)
     annotation class UnsafeClient
@@ -44,12 +43,20 @@ object NetworkModule {
                 listOf(
                     ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
                         .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
-                        .allEnabledCipherSuites()
                         .build()
                 )
             )
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
+            .apply {
+                if (BuildConfig.DEBUG) {
+                    addInterceptor(
+                        HttpLoggingInterceptor().apply {
+                            level = HttpLoggingInterceptor.Level.BASIC
+                        }
+                    )
+                }
+            }
             .build()
     }
 
@@ -72,7 +79,7 @@ object NetworkModule {
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
 
-            val sslContext = SSLContext.getInstance("SSL")
+            val sslContext = SSLContext.getInstance("TLS")
             sslContext.init(null, trustAllCerts, SecureRandom())
 
             OkHttpClient.Builder()
@@ -80,11 +87,6 @@ object NetworkModule {
                 .hostnameVerifier { _, _ -> true }
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(60, TimeUnit.SECONDS)
-                .addInterceptor(
-                    HttpLoggingInterceptor().apply {
-                        level = HttpLoggingInterceptor.Level.BASIC
-                    }
-                )
                 .build()
         } catch (e: Exception) {
             throw RuntimeException(e)

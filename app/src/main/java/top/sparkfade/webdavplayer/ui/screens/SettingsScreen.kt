@@ -42,6 +42,7 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsState()
 
     var deepScanEnabled by remember { mutableStateOf(false) }
+    var accountPendingDelete by remember { mutableStateOf<WebDavAccount?>(null) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshStorageInfo()
@@ -130,7 +131,7 @@ fun SettingsScreen(
                         isSyncing = isSyncing,
                         onRefresh = { viewModel.refreshAccount(account, deepScan = deepScanEnabled) },
                         onEdit = { onEditAccount(account) },
-                        onDelete = { viewModel.deleteAccount(account) }
+                        onDelete = { accountPendingDelete = account }
                     )
                 }
             }
@@ -158,11 +159,35 @@ fun SettingsScreen(
             SettingsItem(
                 icon = Icons.Default.Image,
                 title = "Clear Cover Images",
-                // [修改] 显示具体大小
                 subtitle = "Used: ${Formatter.formatFileSize(context, coverCacheSize)} (Album Art)",
                 onClick = { viewModel.clearImageCache() }
             )
         }
+    }
+
+    accountPendingDelete?.let { account ->
+        AlertDialog(
+            onDismissRequest = { accountPendingDelete = null },
+            title = { Text("Delete Account") },
+            text = {
+                Text(
+                    "Delete \"${account.name.ifEmpty { account.url }}\"? " +
+                        "All its songs, downloads and cached data will be removed. " +
+                        "This cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteAccount(account)
+                        accountPendingDelete = null
+                    }
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { accountPendingDelete = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 

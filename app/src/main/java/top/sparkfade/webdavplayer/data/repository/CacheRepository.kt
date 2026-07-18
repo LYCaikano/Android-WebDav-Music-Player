@@ -14,17 +14,25 @@ class CacheRepository @Inject constructor(
     // 1. 清理 ExoPlayer 音频缓冲 (全部)
     @OptIn(UnstableApi::class)
     fun clearAudioCache() {
-        // 遍历所有 Key 并移除
         val keys = cache.keys
         for (key in keys) {
-            cache.removeResource(key)
+            try {
+                cache.removeResource(key)
+            } catch (e: Exception) {
+                android.util.Log.w("CacheRepository", "Failed to remove cached resource: $key", e)
+            }
         }
     }
 
-    // [新增] 按 Key (Song ID) 移除特定歌曲的缓存
+    // 按 Key (Song ID) 移除特定歌曲的缓存；
+    // 缓存被播放器锁定时移除会抛异常，此处安全降级
     @OptIn(UnstableApi::class)
     fun removeResource(key: String) {
-        cache.removeResource(key)
+        try {
+            cache.removeResource(key)
+        } catch (e: Exception) {
+            android.util.Log.w("CacheRepository", "Failed to remove cached resource: $key", e)
+        }
     }
 
     // 2. 清理下载的歌曲 (显式下载)

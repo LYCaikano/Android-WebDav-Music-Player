@@ -29,9 +29,16 @@ interface PlaylistDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun addSongsToPlaylist(crossRefs: List<PlaylistSongCrossRef>)
 
-    // [新增] 批量添加 (用于保存播放队列)
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPlaylistSongCrossRefs(crossRefs: List<PlaylistSongCrossRef>)
+
+    @Transaction
+    suspend fun replacePlaylistSongs(playlistId: Long, crossRefs: List<PlaylistSongCrossRef>) {
+        clearPlaylist(playlistId)
+        if (crossRefs.isNotEmpty()) {
+            insertPlaylistSongCrossRefs(crossRefs)
+        }
+    }
 
     @Query("DELETE FROM playlist_song_cross_ref WHERE playlistId = :playlistId AND songId = :songId")
     suspend fun removeSongFromPlaylist(playlistId: Long, songId: Long)

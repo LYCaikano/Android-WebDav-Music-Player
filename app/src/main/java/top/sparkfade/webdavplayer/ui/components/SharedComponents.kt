@@ -13,10 +13,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.ui.viewmodel.MainViewModel
+import top.sparkfade.webdavplayer.utils.Constants
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +57,7 @@ fun SongSelectionDialog(
                 )
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                    items(filteredList) { song ->
+                    items(filteredList, key = { it.id }) { song ->
                         val isAdded = disabledSongIds.contains(song.id)
                         SongSelectionItem(
                             song = song,
@@ -115,7 +117,7 @@ fun BatchSongSelectionDialog(
                 Spacer(Modifier.height(8.dp))
                 
                 LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                    items(filteredList) { song ->
+                    items(filteredList, key = { it.id }) { song ->
                         val isAlreadyIn = existingSongIds.contains(song.id)
                         val isSelected = selectedIds.contains(song.id)
 
@@ -139,13 +141,20 @@ fun BatchSongSelectionDialog(
                                 enabled = !isAlreadyIn // 已存在的禁止取消勾选（这是添加模式，不是管理模式）
                             )
                             Spacer(Modifier.width(8.dp))
-                            
+
                             Column(modifier = Modifier.weight(1f)) {
-                                MarqueeText(text = song.title, style = MaterialTheme.typography.bodyLarge)
-                                MarqueeText(
-                                    text = song.artist, 
-                                    style = MaterialTheme.typography.bodySmall, 
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                Text(
+                                    text = song.title,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = song.artist,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             
@@ -199,8 +208,19 @@ private fun SongSelectionItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            MarqueeText(text = song.title, style = MaterialTheme.typography.bodyLarge)
-            MarqueeText(text = song.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                text = song.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = song.artist,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
         if (isAdded) {
             Spacer(Modifier.width(8.dp))
@@ -233,7 +253,12 @@ fun SongDetailDialog(song: Song, duration: Long = 0L, onDismiss: () -> Unit) {
 fun DetailItem(label: String, value: String) {
     Column {
         Text(text = label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-        MarqueeText(text = value, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -252,7 +277,7 @@ fun PlaylistSelectionDialog(song: Song, viewModel: MainViewModel, onDismiss: () 
         title = { Text("Add to Playlists") },
         text = {
             LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
-                items(playlistsWithStatus) { (playlist, isAdded) ->
+                items(playlistsWithStatus, key = { it.first.id }) { (playlist, isAdded) ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -261,7 +286,7 @@ fun PlaylistSelectionDialog(song: Song, viewModel: MainViewModel, onDismiss: () 
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                            if (playlist.id == 1L) {
+                            if (playlist.id == Constants.PLAYLIST_ID_FAVORITES) {
                                 Icon(
                                     imageVector = if (isAdded) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                                     contentDescription = "Favorite",
@@ -272,9 +297,13 @@ fun PlaylistSelectionDialog(song: Song, viewModel: MainViewModel, onDismiss: () 
                                 Checkbox(checked = isAdded, onCheckedChange = { checked -> viewModel.toggleSongInPlaylist(playlist.id, song.id, checked) })
                             }
                         }
-                        Box(modifier = Modifier.weight(1f)) {
-                            MarqueeText(text = playlist.name, style = MaterialTheme.typography.bodyLarge)
-                        }
+                        Text(
+                            text = playlist.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
                 if (playlistsWithStatus.isEmpty()) item { Text("No playlists available.") }
@@ -292,24 +321,38 @@ fun SongListItem(
     onDelete: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onViewDetails: () -> Unit,
-    downloadProgress: Float? = null 
+    downloadProgressFlow: kotlinx.coroutines.flow.Flow<Float?>? = null
 ) {
     val isDownloaded = song.localPath != null
     var menuExpanded by remember { mutableStateOf(false) }
+    // item 级进度订阅：仅下载中的那一行随进度重组，而非整个列表
+    val downloadProgress by
+            (downloadProgressFlow ?: kotlinx.coroutines.flow.flowOf(null))
+                    .collectAsState(initial = null)
 
     Column {
         ListItem(
-            headlineContent = { 
-                MarqueeText(text = song.title, style = MaterialTheme.typography.bodyLarge) 
+            headlineContent = {
+                Text(
+                    text = song.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             },
-            supportingContent = { 
+            supportingContent = {
                 Column {
-                    MarqueeText(text = song.artist, style = MaterialTheme.typography.bodySmall)
-                    
+                    Text(
+                        text = song.artist,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
                     if (downloadProgress != null) {
                         Spacer(Modifier.height(4.dp))
                         LinearProgressIndicator(
-                            progress = downloadProgress,
+                            progress = downloadProgress!!,
                             modifier = Modifier.fillMaxWidth().height(4.dp),
                             trackColor = MaterialTheme.colorScheme.surfaceVariant,
                             color = MaterialTheme.colorScheme.primary

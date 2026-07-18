@@ -20,7 +20,6 @@ private const val PAGE_SIZE = 20
 @Composable
 fun LibraryScreen(viewModel: MainViewModel, onNavigateToPlayer: () -> Unit) {
     val allFilteredSongs by viewModel.filteredSongs.collectAsState()
-    val downloadProgressMap by viewModel.downloadProgressMap.collectAsState()
 
     var songForPlaylist by remember { mutableStateOf<Song?>(null) }
     var songForDetails by remember { mutableStateOf<Song?>(null) }
@@ -39,6 +38,9 @@ fun LibraryScreen(viewModel: MainViewModel, onNavigateToPlayer: () -> Unit) {
         val listState = rememberLazyListState()
         val visibleCount = min(displayCount, totalSize)
         val hasMore = displayCount < totalSize
+        val visibleSongs = remember(allFilteredSongs, visibleCount) {
+            allFilteredSongs.take(visibleCount)
+        }
 
         // derivedStateOf 高效追踪是否到达列表底部
         val reachedBottom by remember {
@@ -64,11 +66,16 @@ fun LibraryScreen(viewModel: MainViewModel, onNavigateToPlayer: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 150.dp)
         ) {
-            items(count = visibleCount, key = { index -> allFilteredSongs[index].id }) { index ->
-                val song = allFilteredSongs[index]
+            items(
+                    count = visibleSongs.size,
+                    key = { index -> visibleSongs[index].id },
+                    contentType = { "song" }
+            ) { index ->
+                val song = visibleSongs[index]
                 SongListItem(
                         song = song,
-                        downloadProgress = downloadProgressMap[song.id],
+                        downloadProgressFlow =
+                                remember(song.id) { viewModel.downloadProgressFlow(song.id) },
                         onClick = {
                             viewModel.playSong(song, allFilteredSongs)
                             onNavigateToPlayer()
@@ -81,7 +88,7 @@ fun LibraryScreen(viewModel: MainViewModel, onNavigateToPlayer: () -> Unit) {
             }
 
             if (hasMore) {
-                item {
+                item(contentType = "loading") {
                     Box(
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             contentAlignment = Alignment.Center

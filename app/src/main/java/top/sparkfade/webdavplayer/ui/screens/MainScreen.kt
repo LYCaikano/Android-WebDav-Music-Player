@@ -43,12 +43,6 @@ fun MainScreen(
     val navBackStackEntry by tabNavController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    val currentSong by viewModel.currentPlayingSong.collectAsState()
-    val isPlaying by viewModel.isPlaying.collectAsState()
-    val isBuffering by viewModel.isBuffering.collectAsState()
-    val progress by viewModel.playbackProgress.collectAsState()
-    val duration by viewModel.playbackDuration.collectAsState()
-    val bufferedPosition by viewModel.bufferedPosition.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
 
     val scanningStatus by viewModel.scanningStatus.collectAsState()
@@ -138,25 +132,12 @@ fun MainScreen(
             },
             bottomBar = {
                 Column(modifier = Modifier.animateContentSize()) {
-                    if (currentSong != null) {
-                        Divider(
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                thickness = 0.5.dp
-                        )
-                        MiniPlayer(
-                                song = currentSong!!,
-                                isPlaying = isPlaying,
-                                isBuffering = isBuffering,
-                                progress = progress,
-                                duration = duration,
-                                bufferedPosition = bufferedPosition,
-                                onTogglePlay = { viewModel.togglePlayPause() },
-                                onClick = onNavigateToPlayer,
-                                onSkipNext = { viewModel.skipToNext() },
-                                onSkipPrevious = { viewModel.skipToPrevious() },
-                                onShowPlaylist = { showPlaylistSheet = true }
-                        )
-                    }
+                    // MiniPlayer 独立订阅高频进度流，避免 NavigationBar 随之重组
+                    MiniPlayerSection(
+                            viewModel = viewModel,
+                            onNavigateToPlayer = onNavigateToPlayer,
+                            onShowPlaylist = { showPlaylistSheet = true }
+                    )
 
                     NavigationBar(modifier = Modifier.height(80.dp)) {
                         val items = listOf("Songs", "Albums", "Artists", "Playlists")
@@ -313,5 +294,41 @@ fun MainScreen(
     // 播放列表 Bottom Sheet
     if (showPlaylistSheet) {
         PlaylistBottomSheet(viewModel = viewModel, onDismiss = { showPlaylistSheet = false })
+    }
+}
+
+@Composable
+private fun MiniPlayerSection(
+        viewModel: MainViewModel,
+        onNavigateToPlayer: () -> Unit,
+        onShowPlaylist: () -> Unit
+) {
+    val currentSong by viewModel.currentPlayingSong.collectAsState()
+    val isPlaying by viewModel.isPlaying.collectAsState()
+    val isBuffering by viewModel.isBuffering.collectAsState()
+    val progress by viewModel.playbackProgress.collectAsState()
+    val duration by viewModel.playbackDuration.collectAsState()
+    val bufferedPosition by viewModel.bufferedPosition.collectAsState()
+
+    val song = currentSong ?: return
+
+    Column {
+        Divider(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                thickness = 0.5.dp
+        )
+        MiniPlayer(
+                song = song,
+                isPlaying = isPlaying,
+                isBuffering = isBuffering,
+                progress = progress,
+                duration = duration,
+                bufferedPosition = bufferedPosition,
+                onTogglePlay = { viewModel.togglePlayPause() },
+                onClick = onNavigateToPlayer,
+                onSkipNext = { viewModel.skipToNext() },
+                onSkipPrevious = { viewModel.skipToPrevious() },
+                onShowPlaylist = onShowPlaylist
+        )
     }
 }

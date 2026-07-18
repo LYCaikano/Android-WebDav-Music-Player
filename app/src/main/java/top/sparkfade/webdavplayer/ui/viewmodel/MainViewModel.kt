@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -25,8 +26,10 @@ import top.sparkfade.webdavplayer.data.model.Playlist
 import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
 import top.sparkfade.webdavplayer.data.repository.CacheRepository
+import top.sparkfade.webdavplayer.data.repository.CoverArtStore
 import top.sparkfade.webdavplayer.data.repository.FileDownloader
 import top.sparkfade.webdavplayer.data.repository.MusicRepository
+import top.sparkfade.webdavplayer.utils.Constants
 import top.sparkfade.webdavplayer.utils.dataStore
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -37,7 +40,8 @@ constructor(
         app: Application,
         private val repository: MusicRepository,
         downloader: FileDownloader,
-        cacheRepository: CacheRepository
+        cacheRepository: CacheRepository,
+        coverArtStore: CoverArtStore
 ) : AndroidViewModel(app) {
 
     private val _startDestination = MutableStateFlow<String?>(null)
@@ -56,13 +60,16 @@ constructor(
                     repository = repository,
                     downloader = downloader,
                     cacheRepository = cacheRepository,
+                    coverArtStore = coverArtStore,
                     allSongs = allSongs
             )
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
 
-    val downloadProgressMap = playbackSession.downloadProgressMap
+    /** item 级下载进度订阅：仅当该歌曲进度变化时发射，避免整表拷贝引发全列表重组 */
+    fun downloadProgressFlow(songId: Long): Flow<Float?> =
+            playbackSession.downloadProgressMap.map { it[songId] }.distinctUntilChanged()
 
     fun onSearchQueryChanged(query: String) {
         _searchQuery.value = query
@@ -94,6 +101,7 @@ constructor(
                                 }
                                 .sortedBy { it.name }
                     }
+                    .distinctUntilChanged()
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val artists: StateFlow<List<ArtistData>> =
@@ -119,11 +127,12 @@ constructor(
                                 .filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
                                 .sortedBy { it.name }
                     }
+                    .distinctUntilChanged()
                     .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val playlists: StateFlow<List<Playlist>> =
             combine(repository.allPlaylists, _searchQuery) { list, query ->
-                        val visibleList = list.filter { it.id != 3L }
+                        val visibleList = list.filter { it.id != Constants.PLAYLIST_ID_QUEUE }
                         if (query.isBlank()) visibleList
                         else visibleList.filter { it.name.contains(query, ignoreCase = true) }
                     }
@@ -167,7 +176,7 @@ constructor(
         viewModelScope.launch {
             repository.initDefaultPlaylists()
             val prefs = getApplication<Application>().dataStore.data.first()
-            _themeMode.value = prefs[intPreferencesKey("theme_mode")] ?: 0
+            _themeMode.value = prefs[intPreferencesKey(Constants.PREF_THEME_MODE)] ?: 0
             val accounts = repository.allAccounts.first()
             playbackSession.initializeSession(accounts)
             if (accounts.isNotEmpty()) {
@@ -184,7 +193,9 @@ constructor(
                 all,
                 currentIds ->
             val playlistIdSet = currentIds.toHashSet()
-            all.filter { it.id != 2L && it.id != 3L }.map { playlist ->
+            all.filter {
+                it.id != Constants.PLAYLIST_ID_DOWNLOADS && it.id != Constants.PLAYLIST_ID_QUEUE
+            }.map { playlist ->
                 playlist to playlistIdSet.contains(playlist.id)
             }
         }
@@ -278,6 +289,7 @@ constructor(
             val savedAccount = account.copy(id = savedId)
             playbackSession.initializeSession(repository.getAllAccountsList())
             refreshAccount(savedAccount)
+            _accountToEdit.value = null
             callback()
         }
     }
@@ -337,7 +349,7 @@ constructor(
         _themeMode.value = mode
         viewModelScope.launch {
             getApplication<Application>().dataStore.edit {
-                it[intPreferencesKey("theme_mode")] = mode
+                it[intPreferencesKey(Constants.PREF_THEME_MODE)] = mode
             }
         }
     }

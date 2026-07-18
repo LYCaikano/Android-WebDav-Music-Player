@@ -23,10 +23,7 @@ data class Song(
     val size: Long,
     val mimeType: String,
     val localPath: String? = null,
+    // 保留列以避免破坏性迁移；离线可用性请以 localPath != null 判断
     val isCached: Boolean = false,
     val isMetadataVerified: Boolean = false
-) : Parcelable {
-    fun getPlayableUrl(): String {
-        return localPath ?: remotePath
-    }
-}
+) : Parcelable

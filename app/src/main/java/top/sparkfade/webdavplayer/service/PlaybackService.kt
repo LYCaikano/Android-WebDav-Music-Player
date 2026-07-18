@@ -14,6 +14,8 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class PlaybackService : MediaSessionService() {
 
+    // 进程级 Hilt 单例：Service 销毁时不 release，
+    // 避免 Service 重启后注入到已释放的播放器实例
     @Inject
     lateinit var player: ExoPlayer
 
@@ -31,34 +33,16 @@ class PlaybackService : MediaSessionService() {
 
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(pIntent)
-            .setCallback(MediaSessionCallback())
             .build()
     }
 
-    // 返回类型匹配 MediaSessionService 的要求
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
         return mediaSession
     }
 
     override fun onDestroy() {
-        mediaSession?.run {
-            player.release()
-            release()
-            mediaSession = null
-        }
+        mediaSession?.release()
+        mediaSession = null
         super.onDestroy()
-    }
-
-    private inner class MediaSessionCallback : MediaSession.Callback {
-        override fun onConnect(
-            session: MediaSession,
-            controller: MediaSession.ControllerInfo
-        ): MediaSession.ConnectionResult {
-            val connectionResult = super.onConnect(session, controller)
-            val sessionCommands = connectionResult.availableSessionCommands
-                .buildUpon()
-                .build()
-            return MediaSession.ConnectionResult.accept(sessionCommands, connectionResult.availablePlayerCommands)
-        }
     }
 }

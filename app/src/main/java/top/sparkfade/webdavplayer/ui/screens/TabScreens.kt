@@ -23,10 +23,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import top.sparkfade.webdavplayer.data.model.Playlist
-import top.sparkfade.webdavplayer.ui.components.MarqueeText
 import top.sparkfade.webdavplayer.ui.viewmodel.MainViewModel
 import java.io.File
 
@@ -90,16 +90,20 @@ fun GridItemCard(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                MarqueeText(
+                Text(
                     text = title,
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                MarqueeText(
+                Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
@@ -133,7 +137,7 @@ fun AlbumsPage(viewModel: MainViewModel, onAlbumClick: (String) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            items(albums) { album -> GridItemCard(album.name, "${album.count} Songs", album.artPath, Icons.Default.Album, { onAlbumClick(album.name) }) }
+            items(albums, key = { it.name }) { album -> GridItemCard(album.name, "${album.count} Songs", album.artPath, Icons.Default.Album, { onAlbumClick(album.name) }) }
         }
     }
 }
@@ -148,7 +152,7 @@ fun ArtistsPage(viewModel: MainViewModel, onArtistClick: (String) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            items(artists) { artist -> GridItemCard(artist.name, "${artist.count} Songs", null, Icons.Default.Person, { onArtistClick(artist.name) }) }
+            items(artists, key = { it.name }) { artist -> GridItemCard(artist.name, "${artist.count} Songs", null, Icons.Default.Person, { onArtistClick(artist.name) }) }
         }
     }
 }
@@ -158,7 +162,8 @@ fun PlaylistsPage(viewModel: MainViewModel, onPlaylistClick: (String) -> Unit) {
     val playlists by viewModel.playlists.collectAsState()
     var activePlaylist by remember { mutableStateOf<Playlist?>(null) }
     var showRenameDialog by remember { mutableStateOf(false) }
-    
+    var playlistPendingDelete by remember { mutableStateOf<Playlist?>(null) }
+
     if (playlists.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No Playlists") }
     } else {
@@ -169,9 +174,9 @@ fun PlaylistsPage(viewModel: MainViewModel, onPlaylistClick: (String) -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(playlists) { playlist ->
-                var menuExpanded by remember { mutableStateOf(false) }
-                
+            items(playlists, key = { it.id }) { playlist ->
+                var menuExpanded by remember(playlist.id) { mutableStateOf(false) }
+
                 GridItemCard(
                     title = playlist.name,
                     subtitle = if(playlist.isSystem) "System" else "User",
@@ -195,7 +200,7 @@ fun PlaylistsPage(viewModel: MainViewModel, onPlaylistClick: (String) -> Unit) {
                             leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
                             onClick = {
                                 menuExpanded = false
-                                viewModel.deletePlaylist(playlist)
+                                playlistPendingDelete = playlist
                             }
                         )
                     }
@@ -209,8 +214,8 @@ fun PlaylistsPage(viewModel: MainViewModel, onPlaylistClick: (String) -> Unit) {
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
             title = { Text("Rename Playlist") },
-            text = { 
-                OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("Name") }, singleLine = true) 
+            text = {
+                OutlinedTextField(value = newName, onValueChange = { newName = it }, label = { Text("Name") }, singleLine = true)
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -218,6 +223,25 @@ fun PlaylistsPage(viewModel: MainViewModel, onPlaylistClick: (String) -> Unit) {
                 }) { Text("Rename") }
             },
             dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") } }
+        )
+    }
+
+    playlistPendingDelete?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { playlistPendingDelete = null },
+            title = { Text("Delete Playlist") },
+            text = { Text("Delete \"${playlist.name}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deletePlaylist(playlist)
+                        playlistPendingDelete = null
+                    }
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistPendingDelete = null }) { Text("Cancel") }
+            }
         )
     }
 }

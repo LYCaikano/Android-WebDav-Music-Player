@@ -17,8 +17,6 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import java.io.File
-import java.io.FileOutputStream
-import java.net.URLDecoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
@@ -42,9 +41,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import top.sparkfade.webdavplayer.data.model.Song
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
 import top.sparkfade.webdavplayer.data.repository.CacheRepository
+import top.sparkfade.webdavplayer.data.repository.CoverArtStore
 import top.sparkfade.webdavplayer.data.repository.FileDownloader
 import top.sparkfade.webdavplayer.data.repository.MusicRepository
 import top.sparkfade.webdavplayer.service.PlaybackService
+import top.sparkfade.webdavplayer.utils.Constants
 import top.sparkfade.webdavplayer.utils.CurrentSession
 import top.sparkfade.webdavplayer.utils.dataStore
 
@@ -55,6 +56,7 @@ class PlaybackSessionController(
         private val repository: MusicRepository,
         private val downloader: FileDownloader,
         private val cacheRepository: CacheRepository,
+        private val coverArtStore: CoverArtStore,
         private val allSongs: StateFlow<List<Song>>
 ) {
     private val _downloadProgressMap = MutableStateFlow<Map<Long, Float>>(emptyMap())
@@ -67,12 +69,18 @@ class PlaybackSessionController(
     private val _currentPlayingSong = MutableStateFlow<Song?>(null)
     val currentPlayingSong = _currentPlayingSong.asStateFlow()
 
-    val isPlaying = MutableStateFlow(false)
-    val isBuffering = MutableStateFlow(false)
-    val playbackProgress = MutableStateFlow(0L)
-    val bufferedPosition = MutableStateFlow(0L)
-    val playbackDuration = MutableStateFlow(1L)
-    val playbackMode = MutableStateFlow(0)
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying = _isPlaying.asStateFlow()
+    private val _isBuffering = MutableStateFlow(false)
+    val isBuffering = _isBuffering.asStateFlow()
+    private val _playbackProgress = MutableStateFlow(0L)
+    val playbackProgress = _playbackProgress.asStateFlow()
+    private val _bufferedPosition = MutableStateFlow(0L)
+    val bufferedPosition = _bufferedPosition.asStateFlow()
+    private val _playbackDuration = MutableStateFlow(1L)
+    val playbackDuration = _playbackDuration.asStateFlow()
+    private val _playbackMode = MutableStateFlow(0)
+    val playbackMode = _playbackMode.asStateFlow()
     private var bufferingTimeoutJob: Job? = null
     private var consecutiveErrorCount = 0
     private var lastSavedPlaybackBucket = -1L
@@ -102,6 +110,15 @@ class PlaybackSessionController(
             )
     val albumRenameFlow = _albumRenameChannel.receiveAsFlow()
 
+    private val metadataMerger =
+            MetadataMerger(
+                    repository = repository,
+                    coverArtStore = coverArtStore,
+                    allSongs = allSongs,
+                    onAlbumRenamed = { old, new -> _albumRenameChannel.trySend(old to new) },
+                    onStorageChanged = { refreshStorageInfo() }
+            )
+
     init {
         initController(app)
         startProgressUpdater()
@@ -112,15 +129,15 @@ class PlaybackSessionController(
         CurrentSession.clear()
         accounts.forEach { account ->
             val auth = okhttp3.Credentials.basic(account.username, account.password)
-            CurrentSession.updateAuth(account.url, auth)
+            CurrentSession.updateAuth(account.url, auth, account.skipSsl)
         }
     }
 
     fun restorePlaybackState() {
         scope.launch {
             val prefs = app.dataStore.data.first()
-            val lastSongId = prefs[longPreferencesKey("last_song_id")] ?: -1L
-            val lastPos = prefs[longPreferencesKey("last_pos")] ?: 0L
+            val lastSongId = prefs[longPreferencesKey(Constants.PREF_LAST_SONG_ID)] ?: -1L
+            val lastPos = prefs[longPreferencesKey(Constants.PREF_LAST_POSITION)] ?: 0L
 
             if (lastSongId != -1L) {
                 val queue = repository.getQueueSync()
@@ -130,8 +147,8 @@ class PlaybackSessionController(
                 val song = repository.getSongById(lastSongId)
                 if (song != null) {
                     _currentPlayingSong.value = song
-                    playbackProgress.value = lastPos
-                    playbackDuration.value = 1L
+                    _playbackProgress.value = lastPos
+                    _playbackDuration.value = 1L
                     try {
                         withTimeout(10_000) {
                             while (_playerController.value == null) {
@@ -158,21 +175,19 @@ class PlaybackSessionController(
     }
 
     fun addToQueue(song: Song) {
-        val currentList = _currentPlaylist.value.toMutableList()
-        if (currentList.none { it.id == song.id }) {
-            _playerController.value?.addMediaItem(buildMediaItem(song))
-            currentList.add(song)
-            _currentPlaylist.value = currentList
-            scope.launch { repository.addToPlaylist(3, song.id) }
-        }
+        val currentList = _currentPlaylist.value
+        if (currentList.any { it.id == song.id }) return
+        _playerController.value?.addMediaItem(buildMediaItem(song))
+        _currentPlaylist.value = currentList + song
+        scope.launch { repository.addToPlaylist(Constants.PLAYLIST_ID_QUEUE, song.id) }
     }
 
     fun toggleFavorite() {
         val song = _currentPlayingSong.value ?: return
         val isFav = isCurrentSongFavorite.value
         scope.launch {
-            if (isFav) repository.removeFromPlaylist(1, song.id)
-            else repository.addToPlaylist(1, song.id)
+            if (isFav) repository.removeFromPlaylist(Constants.PLAYLIST_ID_FAVORITES, song.id)
+            else repository.addToPlaylist(Constants.PLAYLIST_ID_FAVORITES, song.id)
         }
     }
 
@@ -184,10 +199,10 @@ class PlaybackSessionController(
         val index = playlist.indexOfFirst { it.id == song.id }
         if (index == -1) return
         _currentPlayingSong.value = song
-        playbackProgress.value = 0L
-        bufferedPosition.value = 0L
-        playbackDuration.value = 1L
-        isBuffering.value = true
+        _playbackProgress.value = 0L
+        _bufferedPosition.value = 0L
+        _playbackDuration.value = 1L
+        _isBuffering.value = true
         prepareMediaItems(controller, playlist, index, 0L, true)
     }
 
@@ -197,8 +212,8 @@ class PlaybackSessionController(
         if (index in 0 until _currentPlaylist.value.size) {
             val song = _currentPlaylist.value[index]
             _currentPlayingSong.value = song
-            isBuffering.value = true
-            playbackProgress.value = 0L
+            _isBuffering.value = true
+            _playbackProgress.value = 0L
             controller.seekToDefaultPosition(index)
             controller.play()
         }
@@ -208,17 +223,17 @@ class PlaybackSessionController(
         val player = _playerController.value ?: return
         consecutiveErrorCount = 0
         if (player.hasNextMediaItem()) {
-            isBuffering.value = true
+            _isBuffering.value = true
             player.seekToNext()
         } else {
-            isBuffering.value = false
+            _isBuffering.value = false
         }
     }
 
     fun skipToPrevious() {
         val player = _playerController.value ?: return
         consecutiveErrorCount = 0
-        isBuffering.value = true
+        _isBuffering.value = true
         player.seekToPrevious()
     }
 
@@ -237,8 +252,8 @@ class PlaybackSessionController(
 
     fun togglePlaybackMode() {
         val controller = _playerController.value ?: return
-        val next = (playbackMode.value + 1) % 3
-        playbackMode.value = next
+        val next = (_playbackMode.value + 1) % 3
+        _playbackMode.value = next
         when (next) {
             0 -> {
                 controller.shuffleModeEnabled = false
@@ -258,8 +273,8 @@ class PlaybackSessionController(
     fun seekTo(pos: Long) {
         val player = _playerController.value ?: return
         player.seekTo(pos)
-        isBuffering.value = true
-        playbackProgress.value = pos
+        _isBuffering.value = true
+        _playbackProgress.value = pos
     }
 
     fun downloadSong(song: Song) {
@@ -267,7 +282,7 @@ class PlaybackSessionController(
 
         scope.launch {
             val skipSsl = repository.getAccountById(song.accountId)?.skipSsl == true
-            repository.addToPlaylist(2, song.id)
+            repository.addToPlaylist(Constants.PLAYLIST_ID_DOWNLOADS, song.id)
             downloader.downloadSongFlow(app, song, skipSsl).collect { status ->
                 when (status) {
                     is FileDownloader.DownloadStatus.Progress -> {
@@ -280,7 +295,7 @@ class PlaybackSessionController(
                     }
                     is FileDownloader.DownloadStatus.Error -> {
                         _downloadProgressMap.value = _downloadProgressMap.value - song.id
-                        repository.removeFromPlaylist(2, song.id)
+                        repository.removeFromPlaylist(Constants.PLAYLIST_ID_DOWNLOADS, song.id)
                     }
                 }
             }
@@ -293,7 +308,7 @@ class PlaybackSessionController(
                 song.localPath?.let { File(it).delete() }
                 val updated = song.copy(localPath = null)
                 repository.updateSong(updated)
-                repository.removeFromPlaylist(2, song.id)
+                repository.removeFromPlaylist(Constants.PLAYLIST_ID_DOWNLOADS, song.id)
                 cacheRepository.removeResource(song.id.toString())
 
                 if (_currentPlayingSong.value?.id == song.id) {
@@ -307,17 +322,15 @@ class PlaybackSessionController(
     }
 
     suspend fun prepareForAccountDeletion(account: WebDavAccount, songsToDelete: List<Song>) {
-        val coversDir = File(app.cacheDir, "covers")
-
         val current = _currentPlayingSong.value
         if (current != null && current.accountId == account.id) {
             withContext(Dispatchers.Main) {
                 _playerController.value?.stop()
                 _playerController.value?.clearMediaItems()
                 _currentPlayingSong.value = null
-                isPlaying.value = false
-                playbackProgress.value = 0L
-                playbackDuration.value = 1L
+                _isPlaying.value = false
+                _playbackProgress.value = 0L
+                _playbackDuration.value = 1L
             }
         }
 
@@ -330,25 +343,7 @@ class PlaybackSessionController(
         songsToDelete.forEach { song ->
             try {
                 song.localPath?.let { path -> File(path).delete() }
-                song.artworkPath?.let { path -> File(path).delete() }
-
-                if (coversDir.exists()) {
-                    File(coversDir, "song_${song.id}.jpg").delete()
-
-                    if (song.album != "Unknown" && song.album != "Unknown Album") {
-                        File(coversDir, "alb_${song.album.hashCode()}.jpg").delete()
-                    }
-
-                    val folderPathHash =
-                            try {
-                                URLDecoder.decode(song.remotePath.substringBeforeLast('/'), "UTF-8")
-                                        .hashCode()
-                            } catch (e: Exception) {
-                                0
-                            }
-                    File(coversDir, "dir_$folderPathHash.jpg").delete()
-                }
-
+                coverArtStore.deleteCoversFor(song)
                 cacheRepository.removeResource(song.id.toString())
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -359,21 +354,33 @@ class PlaybackSessionController(
     fun removeFromQueue(song: Song) {
         if (_currentPlayingSong.value?.id == song.id) return
 
+        // 以播放器队列为事实源查找索引，避免与 _currentPlaylist 错位时删错歌
+        val player = _playerController.value
+        if (player != null) {
+            val playerIndex =
+                    (0 until player.mediaItemCount).firstOrNull {
+                        player.getMediaItemAt(it).mediaId == song.id.toString()
+                    }
+            if (playerIndex != null) {
+                player.removeMediaItem(playerIndex)
+            }
+        }
+
         val currentList = _currentPlaylist.value.toMutableList()
         val index = currentList.indexOfFirst { it.id == song.id }
-
         if (index != -1) {
-            _playerController.value?.removeMediaItem(index)
             currentList.removeAt(index)
             _currentPlaylist.value = currentList
-            scope.launch { repository.removeFromPlaylist(3, song.id) }
         }
+        scope.launch { repository.removeFromPlaylist(Constants.PLAYLIST_ID_QUEUE, song.id) }
     }
 
     fun refreshStorageInfo() {
-        scope.launch {
-            cacheSize.value = cacheRepository.getCacheSize()
-            coverCacheSize.value = cacheRepository.getCoverCacheSize(app.cacheDir)
+        scope.launch(Dispatchers.IO) {
+            val audio = cacheRepository.getCacheSize()
+            val covers = cacheRepository.getCoverCacheSize(app.cacheDir)
+            cacheSize.value = audio
+            coverCacheSize.value = covers
         }
     }
 
@@ -406,7 +413,7 @@ class PlaybackSessionController(
 
             repository.clearLocalPaths()
             repository.clearArtworkPaths()
-            repository.clearPlaylist(2)
+            repository.clearPlaylist(Constants.PLAYLIST_ID_DOWNLOADS)
 
             val current = _currentPlayingSong.value
             if (current?.localPath != null) {
@@ -419,8 +426,18 @@ class PlaybackSessionController(
     }
 
     fun onCleared() {
-        playbackProgress.value.let { savePlaybackState(it) }
+        val pos = _playbackProgress.value
+        val song = _currentPlayingSong.value
         controllerFuture?.let { MediaController.releaseFuture(it) }
+        // viewModelScope 已取消，使用 runBlocking 确保最后一次进度落盘
+        if (song != null) {
+            kotlinx.coroutines.runBlocking {
+                app.dataStore.edit {
+                    it[longPreferencesKey(Constants.PREF_LAST_SONG_ID)] = song.id
+                    it[longPreferencesKey(Constants.PREF_LAST_POSITION)] = pos
+                }
+            }
+        }
     }
 
     private suspend fun replaceQueue(newQueue: List<Song>) {
@@ -513,8 +530,8 @@ class PlaybackSessionController(
         val song = _currentPlayingSong.value ?: return
         scope.launch {
             app.dataStore.edit {
-                it[longPreferencesKey("last_song_id")] = song.id
-                it[longPreferencesKey("last_pos")] = pos
+                it[longPreferencesKey(Constants.PREF_LAST_SONG_ID)] = song.id
+                it[longPreferencesKey(Constants.PREF_LAST_POSITION)] = pos
             }
         }
     }
@@ -543,13 +560,11 @@ class PlaybackSessionController(
         val playlist = _currentPlaylist.value
         if (playlist.isEmpty()) return -1
 
-        fun Song.isAvailableOffline(): Boolean = localPath != null || isCached
-
         var forward = currentIndex + 1
         var backward = currentIndex - 1
         while (forward < playlist.size || backward >= 0) {
-            if (forward < playlist.size && playlist[forward].isAvailableOffline()) return forward
-            if (backward >= 0 && playlist[backward].isAvailableOffline()) return backward
+            if (forward < playlist.size && playlist[forward].localPath != null) return forward
+            if (backward >= 0 && playlist[backward].localPath != null) return backward
             forward++
             backward--
         }
@@ -561,14 +576,13 @@ class PlaybackSessionController(
 
         val currentIndex = player.currentMediaItemIndex
         val offlineIdx = findNearestOfflineIndex(currentIndex)
-        if (offlineIdx != -1) {
+        if (offlineIdx != -1 && offlineIdx < _currentPlaylist.value.size) {
             player.seekToDefaultPosition(offlineIdx)
-            player.prepare()
             player.play()
             _currentPlayingSong.value = _currentPlaylist.value[offlineIdx]
         } else {
             player.stop()
-            isBuffering.value = false
+            _isBuffering.value = false
             _playbackError.trySend("无可用离线歌曲")
         }
         return true
@@ -578,16 +592,16 @@ class PlaybackSessionController(
         player?.addListener(
                 object : Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        this@PlaybackSessionController.isPlaying.value = isPlaying
+                        this@PlaybackSessionController._isPlaying.value = isPlaying
                     }
 
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         updateCurrentSongById(mediaItem?.mediaId)
                         lastSavedPlaybackBucket = -1L
-                        playbackProgress.value = 0L
-                        bufferedPosition.value = 0L
-                        playbackDuration.value = 1L
-                        isBuffering.value = player.playbackState == Player.STATE_BUFFERING
+                        _playbackProgress.value = 0L
+                        _bufferedPosition.value = 0L
+                        _playbackDuration.value = 1L
+                        _isBuffering.value = player.playbackState == Player.STATE_BUFFERING
 
                         val current = _currentPlayingSong.value
                         if (current != null) {
@@ -623,32 +637,24 @@ class PlaybackSessionController(
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_READY) {
-                            playbackDuration.value = player.duration.coerceAtLeast(1L)
-                            isBuffering.value = false
+                            _playbackDuration.value = player.duration.coerceAtLeast(1L)
+                            _isBuffering.value = false
                             consecutiveErrorCount = 0
                             bufferingTimeoutJob?.cancel()
                             bufferingTimeoutJob = null
                         } else if (playbackState == Player.STATE_ENDED) {
+                            // REPEAT_MODE_ALL/ONE 由播放器自动处理循环，无需手动重播
                             bufferingTimeoutJob?.cancel()
                             bufferingTimeoutJob = null
-                            if (player.mediaItemCount > 0) {
-                                if (player.shuffleModeEnabled) {
-                                    player.shuffleModeEnabled = false
-                                    player.shuffleModeEnabled = true
-                                }
-                                player.seekTo(0, 0)
-                                player.prepare()
-                                player.play()
-                                isBuffering.value = false
-                                isPlaying.value = true
-                            }
+                            _isBuffering.value = false
                         } else if (playbackState == Player.STATE_BUFFERING) {
-                            isBuffering.value = true
+                            _isBuffering.value = true
                             bufferingTimeoutJob?.cancel()
                             bufferingTimeoutJob =
                                     scope.launch {
-                                        delay(5000)
-                                        if (isBuffering.value &&
+                                        // 指数退避：连续失败时拉长等待
+                                        delay(BUFFERING_TIMEOUT_MS * (consecutiveErrorCount + 1))
+                                        if (_isBuffering.value &&
                                                         player.playbackState == Player.STATE_BUFFERING
                                         ) {
                                             consecutiveErrorCount++
@@ -658,11 +664,9 @@ class PlaybackSessionController(
                                                     else "Playback timeout"
                                             )
                                             withContext(Dispatchers.Main) {
-                                                val maxRetries =
-                                                        _currentPlaylist.value.size.coerceAtMost(3)
-                                                if (consecutiveErrorCount >= maxRetries) {
+                                                if (consecutiveErrorCount >= MAX_RETRIES) {
                                                     player.stop()
-                                                    isBuffering.value = false
+                                                    _isBuffering.value = false
                                                     consecutiveErrorCount = 0
                                                 } else if (noNetwork) {
                                                     skipToOfflineOrStop(player)
@@ -670,13 +674,13 @@ class PlaybackSessionController(
                                                     player.seekToNext()
                                                 } else {
                                                     player.stop()
-                                                    isBuffering.value = false
+                                                    _isBuffering.value = false
                                                 }
                                             }
                                         }
                                     }
                         } else {
-                            isBuffering.value = false
+                            _isBuffering.value = false
                             bufferingTimeoutJob?.cancel()
                             bufferingTimeoutJob = null
                         }
@@ -686,11 +690,10 @@ class PlaybackSessionController(
                         consecutiveErrorCount++
                         val noNetwork = !isNetworkAvailable()
                         _playbackError.trySend(if (noNetwork) "No network connection" else "Playback error")
-                        isBuffering.value = false
+                        _isBuffering.value = false
                         bufferingTimeoutJob?.cancel()
                         bufferingTimeoutJob = null
-                        val maxRetries = _currentPlaylist.value.size.coerceAtMost(3)
-                        if (consecutiveErrorCount >= maxRetries) {
+                        if (consecutiveErrorCount >= MAX_RETRIES) {
                             player.stop()
                             consecutiveErrorCount = 0
                         } else if (noNetwork) {
@@ -720,9 +723,9 @@ class PlaybackSessionController(
         )
 
         updateCurrentSongById(player?.currentMediaItem?.mediaId)
-        isPlaying.value = player?.isPlaying == true
-        isBuffering.value = player?.playbackState == Player.STATE_BUFFERING
-        playbackMode.value =
+        _isPlaying.value = player?.isPlaying == true
+        _isBuffering.value = player?.playbackState == Player.STATE_BUFFERING
+        _playbackMode.value =
                 if (player?.shuffleModeEnabled == true) 1
                 else if (player?.repeatMode == Player.REPEAT_MODE_ONE) 2 else 0
     }
@@ -734,185 +737,19 @@ class PlaybackSessionController(
             realAlbum: String?,
             artworkData: ByteArray?
     ) {
-        var updatedSong = targetSong
-        var dataChanged = false
+        val finalSong =
+                metadataMerger.merge(targetSong, realTitle, realArtist, realAlbum, artworkData)
+                        ?: return
 
-        fun isValid(s: String?): Boolean {
-            return !s.isNullOrEmpty() && s != "Unknown" && s != "Unknown Album"
+        if (_currentPlayingSong.value?.id == finalSong.id) {
+            withContext(Dispatchers.Main) { _currentPlayingSong.value = finalSong }
         }
 
-        fun isPlaceholder(album: String): Boolean {
-            val folderName =
-                    try {
-                        val path = targetSong.remotePath.substringBeforeLast('/')
-                        URLDecoder.decode(path, "UTF-8").substringAfterLast('/')
-                    } catch (e: Exception) {
-                        ""
-                    }
-
-            return album == "Unknown" ||
-                    album == "Unknown Album" ||
-                    album.equals("dav", true) ||
-                    album.equals("webdav", true) ||
-                    album == folderName
-        }
-
-        fun isImageValid(file: File): Boolean {
-            return try {
-                val options = android.graphics.BitmapFactory.Options()
-                options.inJustDecodeBounds = true
-                android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
-                options.outWidth > 0 && options.outHeight > 0
-            } catch (e: Exception) {
-                false
-            }
-        }
-
-        val safeTitle = realTitle?.trim()
-        val safeArtist = realArtist?.trim()
-        val safeAlbum = realAlbum?.trim()
-
-        if (isValid(safeTitle) && safeTitle != targetSong.title) {
-            updatedSong = updatedSong.copy(title = safeTitle!!)
-            dataChanged = true
-        }
-
-        if (isValid(safeArtist) && safeArtist != targetSong.artist) {
-            updatedSong = updatedSong.copy(artist = safeArtist!!)
-            dataChanged = true
-        }
-
-        val currentIsPlaceholder = isPlaceholder(targetSong.album)
-        val newIsPlaceholder = safeAlbum.isNullOrEmpty() || isPlaceholder(safeAlbum)
-
-        if ((!newIsPlaceholder || currentIsPlaceholder) &&
-                        safeAlbum != targetSong.album &&
-                        !safeAlbum.isNullOrEmpty()
-        ) {
-            updatedSong = updatedSong.copy(album = safeAlbum)
-            dataChanged = true
-
-            if (!newIsPlaceholder) {
-                val folderPath =
-                        try {
-                            val path = targetSong.remotePath.substringBeforeLast('/')
-                            URLDecoder.decode(path, "UTF-8")
-                        } catch (e: Exception) {
-                            ""
-                        }
-                val oldAlbum = targetSong.album
-
-                if (currentIsPlaceholder) {
-                    val siblings =
-                            allSongs.value.filter {
-                                val itFolder =
-                                        try {
-                                            URLDecoder.decode(
-                                                    it.remotePath.substringBeforeLast('/'),
-                                                    "UTF-8"
-                                            )
-                                        } catch (e: Exception) {
-                                            ""
-                                        }
-                                itFolder == folderPath && it.album == oldAlbum && it.id != targetSong.id
-                            }
-                    if (siblings.isNotEmpty()) {
-                        siblings.forEach { sibling ->
-                            repository.updateSong(sibling.copy(album = safeAlbum))
-                        }
-                        _albumRenameChannel.trySend(oldAlbum to safeAlbum)
-                    }
-                }
-            }
-        }
-
-        if (dataChanged || artworkData != null || targetSong.artworkPath == null) {
-            try {
-                var finalArtworkPath = updatedSong.artworkPath
-                var artChanged = false
-
-                val coversDir = File(app.cacheDir, "covers")
-                if (!coversDir.exists()) coversDir.mkdirs()
-
-                val folderPathHash =
-                        try {
-                            val path = targetSong.remotePath.substringBeforeLast('/')
-                            URLDecoder.decode(path, "UTF-8").hashCode()
-                        } catch (e: Exception) {
-                            0
-                        }
-
-                val folderCoverFile = File(coversDir, "dir_$folderPathHash.jpg")
-
-                val targetAlbumName = updatedSong.album
-                val hasValidAlbum = !isPlaceholder(targetAlbumName)
-                val albumCoverFile =
-                        if (hasValidAlbum) File(coversDir, "alb_${targetAlbumName.hashCode()}.jpg")
-                        else null
-
-                if (artworkData != null) {
-                    val tempFile = File(coversDir, "temp_${System.currentTimeMillis()}.tmp")
-                    try {
-                        val fos = FileOutputStream(tempFile)
-                        fos.write(artworkData)
-                        fos.flush()
-                        fos.fd.sync()
-                        fos.close()
-
-                        if (isImageValid(tempFile)) {
-                            if (albumCoverFile != null) {
-                                tempFile.renameTo(albumCoverFile)
-                                finalArtworkPath = albumCoverFile.absolutePath
-                            } else {
-                                tempFile.renameTo(folderCoverFile)
-                                finalArtworkPath = folderCoverFile.absolutePath
-                            }
-                            artChanged = true
-                        } else {
-                            tempFile.delete()
-                        }
-                    } catch (e: Exception) {
-                        tempFile.delete()
-                        e.printStackTrace()
-                    }
-                } else if (finalArtworkPath == null) {
-                    if (albumCoverFile != null &&
-                                    albumCoverFile.exists() &&
-                                    isImageValid(albumCoverFile)
-                    ) {
-                        finalArtworkPath = albumCoverFile.absolutePath
-                        artChanged = true
-                    } else if (folderCoverFile.exists() && isImageValid(folderCoverFile)) {
-                        finalArtworkPath = folderCoverFile.absolutePath
-                        artChanged = true
-                    }
-                }
-
-                if (dataChanged || artChanged) {
-                    val finalSong =
-                            updatedSong.copy(
-                                    artworkPath = finalArtworkPath,
-                                    isMetadataVerified = true
-                            )
-
-                    repository.updateSong(finalSong)
-
-                    if (_currentPlayingSong.value?.id == finalSong.id) {
-                        withContext(Dispatchers.Main) { _currentPlayingSong.value = finalSong }
-                    }
-
-                    val currentList = _currentPlaylist.value.toMutableList()
-                    val index = currentList.indexOfFirst { it.id == finalSong.id }
-                    if (index != -1) {
-                        currentList[index] = finalSong
-                        _currentPlaylist.value = currentList
-                    }
-
-                    if (artChanged) refreshStorageInfo()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+        val currentList = _currentPlaylist.value.toMutableList()
+        val index = currentList.indexOfFirst { it.id == finalSong.id }
+        if (index != -1) {
+            currentList[index] = finalSong
+            _currentPlaylist.value = currentList
         }
     }
 
@@ -925,25 +762,30 @@ class PlaybackSessionController(
 
     private fun startProgressUpdater() {
         scope.launch {
-            while (true) {
-                _playerController.value?.let { player ->
-                    if (player.isPlaying &&
-                                    !isBuffering.value &&
-                                    player.playbackState == Player.STATE_READY
-                    ) {
-                        val currentPos = player.currentPosition
-                        playbackProgress.value = currentPos
-                        playbackDuration.value = player.duration.coerceAtLeast(1L)
-                        val bucket = currentPos / 5000
-                        if (bucket != lastSavedPlaybackBucket) {
-                            lastSavedPlaybackBucket = bucket
-                            savePlaybackState(currentPos)
+            // 仅在播放期间激活轮询，暂停时休眠以省电
+            _isPlaying.flatMapLatest { playing ->
+                flow<Unit> {
+                    while (true) {
+                        _playerController.value?.let { player ->
+                            if (playing &&
+                                            !_isBuffering.value &&
+                                            player.playbackState == Player.STATE_READY
+                            ) {
+                                val currentPos = player.currentPosition
+                                _playbackProgress.value = currentPos
+                                _playbackDuration.value = player.duration.coerceAtLeast(1L)
+                                val bucket = currentPos / 5000
+                                if (bucket != lastSavedPlaybackBucket) {
+                                    lastSavedPlaybackBucket = bucket
+                                    savePlaybackState(currentPos)
+                                }
+                            }
+                            _bufferedPosition.value = player.bufferedPosition
                         }
+                        delay(500)
                     }
-                    bufferedPosition.value = player.bufferedPosition
                 }
-                delay(500)
-            }
+            }.collect()
         }
     }
 
@@ -953,5 +795,10 @@ class PlaybackSessionController(
         val network = connectivityManager.activeNetwork ?: return false
         val caps = connectivityManager.getNetworkCapabilities(network) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    companion object {
+        private const val BUFFERING_TIMEOUT_MS = 5000L
+        private const val MAX_RETRIES = 3
     }
 }

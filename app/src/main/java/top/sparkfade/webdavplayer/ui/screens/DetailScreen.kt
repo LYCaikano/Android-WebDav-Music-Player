@@ -30,6 +30,7 @@ import top.sparkfade.webdavplayer.ui.components.PlaylistSelectionDialog
 import top.sparkfade.webdavplayer.ui.components.SongDetailDialog
 import top.sparkfade.webdavplayer.ui.components.SongListItem
 import top.sparkfade.webdavplayer.ui.viewmodel.MainViewModel
+import top.sparkfade.webdavplayer.utils.Constants
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,8 +77,6 @@ fun DetailScreen(
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val focusRequester = remember { FocusRequester() }
 
-    val downloadProgressMap by viewModel.downloadProgressMap.collectAsState()
-
     LaunchedEffect(isSearchActive) { if (isSearchActive) focusRequester.requestFocus() }
 
     val displaySongs =
@@ -97,21 +96,20 @@ fun DetailScreen(
     }
 
     // 标题使用动态的 currentIdOrName
+    val allPlaylists by viewModel.playlists.collectAsState()
     val title =
             when (type) {
                 "album" -> currentIdOrName
                 "artist" -> currentIdOrName
-                "playlist" -> {
-                    val pl =
-                            viewModel.playlists.collectAsState().value.find {
-                                it.id.toString() == currentIdOrName
-                            }
-                    pl?.name ?: "Playlist"
-                }
+                "playlist" ->
+                        allPlaylists.find { it.id.toString() == currentIdOrName }?.name
+                                ?: "Playlist"
                 else -> "Details"
             }
 
-    val isUserPlaylist = type == "playlist" && (currentIdOrName.toLongOrNull() ?: 0) > 3
+    val isUserPlaylist =
+            type == "playlist" &&
+                    (currentIdOrName.toLongOrNull() ?: 0) > Constants.PLAYLIST_ID_QUEUE
 
     Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -207,10 +205,11 @@ fun DetailScreen(
                 modifier = Modifier.padding(padding),
                 contentPadding = PaddingValues(bottom = 80.dp)
         ) {
-            items(displaySongs) { song ->
+            items(displaySongs, key = { it.id }, contentType = { "song" }) { song ->
                 SongListItem(
                         song = song,
-                        downloadProgress = downloadProgressMap[song.id],
+                        downloadProgressFlow =
+                                remember(song.id) { viewModel.downloadProgressFlow(song.id) },
                         onClick = {
                             viewModel.playSong(song, displaySongs)
                             onNavigateToPlayer()
@@ -222,7 +221,7 @@ fun DetailScreen(
                 )
             }
             if (displaySongs.isEmpty() && allOriginalSongs.isNotEmpty()) {
-                item {
+                item(contentType = "empty") {
                     Text(
                             text = "No results found",
                             modifier = Modifier.fillMaxWidth().padding(32.dp),

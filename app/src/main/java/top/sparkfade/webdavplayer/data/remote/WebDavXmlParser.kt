@@ -25,16 +25,15 @@ class WebDavXmlParser {
     private fun readMultiStatus(parser: XmlPullParser): List<WebDavResource> {
         val list = mutableListOf<WebDavResource>()
         parser.require(XmlPullParser.START_TAG, null, "multistatus")
-        while (parser.next() != XmlPullParser.END_TAG) {
-            if (parser.eventType != XmlPullParser.START_TAG) continue
-            // 匹配 response 标签
-            if (parser.name.contains("response")) {
-                list.add(readResponse(parser))
-            } else {
-                skip(parser)
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG ->
+                    if (parser.isLocalName("response")) list.add(readResponse(parser))
+                    else skip(parser)
+                XmlPullParser.END_TAG -> if (parser.isLocalName("multistatus")) return list
+                XmlPullParser.END_DOCUMENT -> return list
             }
         }
-        return list
     }
 
     private fun readResponse(parser: XmlPullParser): WebDavResource {
@@ -44,63 +43,77 @@ class WebDavXmlParser {
         var contentType = ""
         var displayName = ""
 
-        while (parser.next() != XmlPullParser.END_TAG) {
-            if (parser.eventType != XmlPullParser.START_TAG) continue
-            val name = parser.name
-            when {
-                name.contains("href") -> href = readText(parser)
-                name.contains("propstat") -> {
-                    // 进入 propstat -> prop
-                    while(parser.next() != XmlPullParser.END_TAG) {
-                        if (parser.eventType != XmlPullParser.START_TAG) continue
-                        if (parser.name.contains("prop")) {
-                            // 读取属性
-                            while(parser.next() != XmlPullParser.END_TAG) {
-                                if (parser.eventType != XmlPullParser.START_TAG) continue
-                                val propName = parser.name
-                                when {
-                                    propName.contains("getcontentlength") -> contentLength = readText(parser).toLongOrNull() ?: 0
-                                    propName.contains("getcontenttype") -> contentType = readText(parser)
-                                    propName.contains("displayname") -> displayName = readText(parser)
-                                    propName.contains("resourcetype") -> {
-                                        // 检查是否是文件夹
-                                        val typeContent = readInnerResourceType(parser)
-                                        if (typeContent) isCollection = true
-                                    }
-                                    else -> skip(parser)
-                                }
-                            }
-                        } else {
-                            skip(parser)
-                        }
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> when {
+                    parser.isLocalName("href") -> href = readText(parser)
+                    parser.isLocalName("propstat") -> {
+                        val result = readPropstat(parser)
+                        if (result.contentLength > 0) contentLength = result.contentLength
+                        if (result.contentType.isNotEmpty()) contentType = result.contentType
+                        if (result.displayName.isNotEmpty()) displayName = result.displayName
+                        if (result.isCollection) isCollection = true
                     }
+                    else -> skip(parser)
                 }
-                else -> skip(parser)
+                XmlPullParser.END_TAG -> if (parser.isLocalName("response")) break
+                XmlPullParser.END_DOCUMENT -> break
             }
         }
-        
-        // 兜底：如果没有 displayName，尝试从 href 截取
+
         if (displayName.isEmpty()) {
             val rawName = href.trim('/').substringAfterLast('/')
-            try {
-                displayName = java.net.URLDecoder.decode(rawName, "UTF-8")
+            displayName = try {
+                URLDecoder.decode(rawName, "UTF-8")
             } catch (e: Exception) {
-                displayName = rawName
+                rawName
             }
         }
 
         return WebDavResource(href, isCollection, contentLength, contentType, displayName)
     }
 
+    private data class Props(
+        val contentLength: Long = 0,
+        val contentType: String = "",
+        val displayName: String = "",
+        val isCollection: Boolean = false
+    )
+
+    private fun readPropstat(parser: XmlPullParser): Props {
+        var contentLength = 0L
+        var contentType = ""
+        var displayName = ""
+        var isCollection = false
+
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> when {
+                    parser.isLocalName("getcontentlength") ->
+                        contentLength = readText(parser).toLongOrNull() ?: 0
+                    parser.isLocalName("getcontenttype") -> contentType = readText(parser)
+                    parser.isLocalName("displayname") -> displayName = readText(parser)
+                    parser.isLocalName("resourcetype") ->
+                        if (readInnerResourceType(parser)) isCollection = true
+                    else -> skip(parser)
+                }
+                XmlPullParser.END_TAG -> if (parser.isLocalName("propstat")) break
+                XmlPullParser.END_DOCUMENT -> break
+            }
+        }
+        return Props(contentLength, contentType, displayName, isCollection)
+    }
+
     private fun readInnerResourceType(parser: XmlPullParser): Boolean {
         var isCollection = false
-        while (parser.next() != XmlPullParser.END_TAG) {
-            if (parser.eventType != XmlPullParser.START_TAG) continue
-            if (parser.name.contains("collection")) {
-                isCollection = true
-                skip(parser) // collection 是个空标签
-            } else {
-                skip(parser)
+        while (true) {
+            when (parser.next()) {
+                XmlPullParser.START_TAG -> {
+                    if (parser.isLocalName("collection")) isCollection = true
+                    skip(parser)
+                }
+                XmlPullParser.END_TAG -> if (parser.isLocalName("resourcetype")) break
+                XmlPullParser.END_DOCUMENT -> break
             }
         }
         return isCollection
@@ -122,7 +135,11 @@ class WebDavXmlParser {
             when (parser.next()) {
                 XmlPullParser.END_TAG -> depth--
                 XmlPullParser.START_TAG -> depth++
+                XmlPullParser.END_DOCUMENT -> return
             }
         }
     }
+
+    private fun XmlPullParser.isLocalName(localName: String): Boolean =
+        name.equals(localName, ignoreCase = false) || name.endsWith(":$localName")
 }

@@ -174,7 +174,7 @@ fun MiniPlayer(
                                     overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                    text = song.artist.ifEmpty { "未知歌手" },
+                                    text = song.artist.ifEmpty { "Unknown Artist" },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,

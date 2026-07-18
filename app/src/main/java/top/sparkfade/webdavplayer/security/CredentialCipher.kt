@@ -3,6 +3,7 @@ package top.sparkfade.webdavplayer.security
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -19,6 +20,10 @@ class CredentialCipher @Inject constructor() {
     private val alias = "webdav_player_credentials"
     private val prefix = "enc::"
 
+    private val keyStore: KeyStore by lazy {
+        KeyStore.getInstance(keyStoreType).apply { load(null) }
+    }
+
     fun encrypt(plainText: String): String {
         if (plainText.isEmpty() || plainText.startsWith(prefix)) {
             return plainText
@@ -30,7 +35,10 @@ class CredentialCipher @Inject constructor() {
         return prefix + Base64.encodeToString(cipher.iv + cipherText, Base64.NO_WRAP)
     }
 
-    fun decrypt(value: String): String {
+    /**
+     * 解密失败（密钥失效、密文损坏）时返回 null，由调用方提示用户重新输入凭证。
+     */
+    fun decrypt(value: String): String? {
         if (!value.startsWith(prefix)) {
             return value
         }
@@ -46,11 +54,12 @@ class CredentialCipher @Inject constructor() {
                 GCMParameterSpec(TAG_SIZE_BITS, iv)
             )
             String(cipher.doFinal(cipherText), StandardCharsets.UTF_8)
-        }.getOrDefault("")
+        }.onFailure {
+            Log.w(TAG, "Failed to decrypt credential, key may have been invalidated", it)
+        }.getOrNull()
     }
 
     private fun getOrCreateSecretKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(keyStoreType).apply { load(null) }
         val existingKey = keyStore.getKey(alias, null) as? SecretKey
         if (existingKey != null) {
             return existingKey
@@ -70,6 +79,7 @@ class CredentialCipher @Inject constructor() {
     }
 
     companion object {
+        private const val TAG = "CredentialCipher"
         private const val IV_SIZE_BYTES = 12
         private const val TAG_SIZE_BITS = 128
     }

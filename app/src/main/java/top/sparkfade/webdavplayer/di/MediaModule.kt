@@ -22,10 +22,20 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
+import top.sparkfade.webdavplayer.security.HostAwareSslSocketFactory
 import top.sparkfade.webdavplayer.utils.CurrentSession
 import java.io.File
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
 import javax.inject.Qualifier
 import javax.inject.Singleton
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -57,19 +67,56 @@ object MediaModule {
         return SimpleCache(cacheDir, evictor, databaseProvider)
     }
 
-    // 2. 动态 Auth 拦截器
-    // 输入：基础的 UnsafeClient (来自 NetworkModule)
-    // 输出：带拦截器的 PlayerClient (供下方 DataSource 使用)
+    // 2. 动态 Auth 拦截器 + 按主机动态 TLS 校验
+    // 默认严格校验证书；仅当主机属于勾选了 skipSsl 的账号时才信任所有证书
     @Provides
     @Singleton
-    @PlayerClient 
-    fun providePlayerOkHttpClient(
-        @NetworkModule.UnsafeClient baseClient: OkHttpClient
-    ): OkHttpClient {
-        return baseClient.newBuilder()
+    @PlayerClient
+    fun providePlayerOkHttpClient(): OkHttpClient {
+        val strictContext = SSLContext.getInstance("TLS")
+        strictContext.init(null, null, null)
+
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(
+                chain: Array<out X509Certificate>?,
+                authType: String?
+            ) {}
+
+            override fun checkServerTrusted(
+                chain: Array<out X509Certificate>?,
+                authType: String?
+            ) {}
+
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+        val trustAllContext = SSLContext.getInstance("TLS")
+        trustAllContext.init(null, trustAllCerts, SecureRandom())
+
+        val defaultTrustManager = TrustManagerFactory
+            .getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            .apply { init(null as KeyStore?) }
+            .trustManagers
+            .filterIsInstance<X509TrustManager>()
+            .first()
+
+        val defaultHostnameVerifier = HttpsURLConnection.getDefaultHostnameVerifier()
+
+        return OkHttpClient.Builder()
+            .sslSocketFactory(
+                HostAwareSslSocketFactory(
+                    strictFactory = strictContext.socketFactory,
+                    trustAllFactory = trustAllContext.socketFactory
+                ),
+                defaultTrustManager
+            )
+            .hostnameVerifier { hostname, session ->
+                if (CurrentSession.isSkipSslHost(hostname)) true
+                else defaultHostnameVerifier.verify(hostname, session)
+            }
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val requestBuilder = chain.request().newBuilder()
-                // 修复：从原始 request 获取 URL
                 val url = chain.request().url.toString()
                 CurrentSession.getAuthForUrl(url)?.let {
                     requestBuilder.addHeader("Authorization", it)

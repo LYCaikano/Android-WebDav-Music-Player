@@ -13,17 +13,11 @@ interface SongDao {
     @Query("SELECT * FROM songs ORDER BY title ASC")
     fun getAllSongs(): Flow<List<Song>>
 
-    @Query("SELECT remotePath FROM songs WHERE accountId = :accountId")
-    suspend fun getRemotePathsByAccountId(accountId: Long): List<String>
-
     @Query("SELECT * FROM songs WHERE accountId = :accountId")
     suspend fun getSongsByAccountId(accountId: Long): List<Song>
 
     @Query("SELECT * FROM songs WHERE id = :id")
     suspend fun getSongById(id: Long): Song?
-
-    @Query("SELECT * FROM songs WHERE accountId = :accountId AND remotePath = :path LIMIT 1")
-    suspend fun getSongByPath(accountId: Long, path: String): Song?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(songs: List<Song>)
@@ -34,17 +28,14 @@ interface SongDao {
     @Update
     suspend fun update(song: Song)
 
-    @Query("DELETE FROM songs")
-    suspend fun clearAll()
-
     @Query("DELETE FROM songs WHERE accountId = :accountId")
     suspend fun clearByAccountId(accountId: Long)
 
-    @Query("DELETE FROM songs WHERE accountId = :accountId AND remotePath = :path")
-    suspend fun deleteByPath(accountId: Long, path: String)
-
     @Query("DELETE FROM songs WHERE accountId = :accountId AND remotePath IN (:paths)")
     suspend fun deleteByPaths(accountId: Long, paths: List<String>)
+
+    @Query("UPDATE songs SET localPath = :localPath WHERE id = :id")
+    suspend fun updateLocalPath(id: Long, localPath: String?)
 
     @Query("UPDATE songs SET localPath = NULL")
     suspend fun clearAllLocalPaths()

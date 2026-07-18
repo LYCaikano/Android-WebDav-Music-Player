@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -67,6 +69,10 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize()
                 ) { _ ->
                     if (startDestination == null) {
+                        Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                        ) { CircularProgressIndicator() }
                         return@Scaffold
                     }
 
@@ -192,7 +198,11 @@ class MainActivity : ComponentActivity() {
                                         onBack = safeBack,
                                         onEditAccount = { account ->
                                             mainViewModel.setEditingAccount(account)
-                                            rootNavController.navigate("login")
+                                            if (canAction()) {
+                                                rootNavController.navigate("login") {
+                                                    launchSingleTop = true
+                                                }
+                                            }
                                         }
                                 )
                             }

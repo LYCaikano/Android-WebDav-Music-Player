@@ -14,8 +14,8 @@ android {
         applicationId = "top.sparkfade.webdavplayer"
         minSdk = 31 // Android 12+
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.4.6"
+        versionCode = 7
+        versionName = "1.4.7"
         
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -32,6 +32,7 @@ android {
         release {
             isDebuggable = false
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -44,6 +45,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"

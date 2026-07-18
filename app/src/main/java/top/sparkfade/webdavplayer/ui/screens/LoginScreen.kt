@@ -19,6 +19,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import top.sparkfade.webdavplayer.data.model.WebDavAccount
+import top.sparkfade.webdavplayer.utils.Constants
 import kotlin.math.roundToInt
 
 @Composable
@@ -139,8 +140,8 @@ fun LoginScreen(
         Slider(
             value = scanDepth,
             onValueChange = { scanDepth = it },
-            valueRange = 1f..10f,
-            steps = 8
+            valueRange = 1f..Constants.MAX_SCAN_DEPTH.toFloat(),
+            steps = Constants.MAX_SCAN_DEPTH - 2
         )
         Text("Higher depth means slower scanning.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
 
